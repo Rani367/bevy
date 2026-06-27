@@ -7,6 +7,8 @@
 //! `Vec` of them works. Restoring assigns new entity ids, so the selection is cleared and
 //! the hierarchy / inspector rebuild via their own dirty flags.
 
+use alloc::collections::VecDeque;
+
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use bevy_input::keyboard::KeyCode;
@@ -24,8 +26,8 @@ const MAX_UNDO: usize = 100;
 /// The undo / redo history. Each entry is a full `SceneEntity` snapshot.
 #[derive(Resource, Default)]
 pub struct UndoStack {
-    undo: Vec<DynamicWorld>,
-    redo: Vec<DynamicWorld>,
+    undo: VecDeque<DynamicWorld>,
+    redo: VecDeque<DynamicWorld>,
     /// Set while a restore is in progress so re-entrant captures are ignored.
     suspended: bool,
 }
@@ -79,9 +81,9 @@ pub fn push_undo(commands: &mut Commands) {
         }
         let snapshot = take_scene_snapshot(world);
         let stack = &mut *world.resource_mut::<UndoStack>();
-        stack.undo.push(snapshot);
+        stack.undo.push_back(snapshot);
         if stack.undo.len() > MAX_UNDO {
-            stack.undo.remove(0);
+            stack.undo.pop_front();
         }
         stack.redo.clear();
     });
@@ -103,22 +105,22 @@ fn on_request_redo(_: On<RequestRedo>, state: Res<State<EditorState>>, mut comma
 
 /// Pop the undo stack, push the current state onto redo, and restore the snapshot.
 fn apply_undo(world: &mut World) {
-    let Some(snapshot) = world.resource_mut::<UndoStack>().undo.pop() else {
+    let Some(snapshot) = world.resource_mut::<UndoStack>().undo.pop_back() else {
         return;
     };
     let current = take_scene_snapshot(world);
-    world.resource_mut::<UndoStack>().redo.push(current);
+    world.resource_mut::<UndoStack>().redo.push_back(current);
     restore_with_guard(world, &snapshot);
     world.resource_mut::<EditorSelection>().clear();
 }
 
 /// Pop the redo stack, push the current state onto undo, and restore the snapshot.
 fn apply_redo(world: &mut World) {
-    let Some(snapshot) = world.resource_mut::<UndoStack>().redo.pop() else {
+    let Some(snapshot) = world.resource_mut::<UndoStack>().redo.pop_back() else {
         return;
     };
     let current = take_scene_snapshot(world);
-    world.resource_mut::<UndoStack>().undo.push(current);
+    world.resource_mut::<UndoStack>().undo.push_back(current);
     restore_with_guard(world, &snapshot);
     world.resource_mut::<EditorSelection>().clear();
 }

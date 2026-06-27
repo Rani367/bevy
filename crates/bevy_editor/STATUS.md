@@ -7,15 +7,23 @@ honest accounting of what works and how it is verified — **everything below is
 
 Run it: `cargo run --example editor --features bevy_editor`
 
+The UI is icon-driven and fully themed (light + dark), with a status bar, toast notifications,
+a command palette, an in-editor log console, and a consistent modal-dialog system — see
+section 14 for the full design-system / polish summary.
+
 ## Verification
 
-- **Unit tests** (`cargo test -p bevy_editor`, 21 tests) cover the logic-heavy pieces with no
+- **Unit tests** (`cargo test -p bevy_editor`, 25 tests) cover the logic-heavy pieces with no
   GPU/UI needed: the scripting language (lexer/parser/evaluator + error cases), the `.scn.ron`
-  serialize→deserialize round-trip (parent links + arbitrary components), the inspector
-  list/option/map reflection ops, the gizmo axis-pick + snapping math, and the build packaging.
+  serialize→deserialize round-trip (parent links + arbitrary components) and the scene-name
+  display logic, the inspector list/option/map reflection ops + axis-sigil and add-component
+  filtering, the gizmo axis-pick + snapping math, and the build packaging.
 - **Interactive paths** (pointer/keyboard gestures) are wired to the same action/observer code
   the unit-tested logic uses; exercise them by running the `editor` example. Each gesture is
   noted below with the action it drives.
+- **Visual capture**: `EDITOR_SCREENSHOT=<path> cargo run --example editor --features bevy_editor`
+  renders the UI to an offscreen target and writes a PNG, then exits — a headless way to verify
+  the look without a visible window.
 
 Everything compiles **zero-warning** (`cargo fmt --check`, `cargo clippy --all-targets`, and the
 `editor` example) and launches on Metal without panics.
@@ -115,6 +123,42 @@ discovery + bundle copy unit-tested).
 component field (`world.spawn_entity` / `world.despawn_entity` / `world.mutate_components`), from
 a remote-actions overlay. The low-level `brp_request` helper (and the typed `brp_spawn` /
 `brp_despawn` / `brp_mutate` / `brp_query_entities`) are public for tooling.
+
+## 14. UI design system + flagship polish — ✅
+A release-grade visual overhaul, all built on the existing `bevy_feathers` primitives:
+
+- **Design system** (`ui/style.rs`, `ui/icons.rs`): centralized spacing / size / z-layer
+  constants, an `editor.*` theme-token set layered onto the Feathers theme, reusable scene
+  builders (`field_row`, `section_header`, `dialog_frame`, `status_segment`), and **59 embedded
+  monochrome icons** (Lucide, ISC) that tint to the theme via `ThemedIcon`.
+- **Icon-driven shell** (`ui/shell.rs`): the toolbar is icon buttons with **active-state
+  highlighting** (the live run-state / gizmo-mode / snap button lights up), menus carry leading
+  icons, panels have icon headers + borders, and the hierarchy shows a per-entity **type icon**
+  (cube / sphere / light / sprite …) plus chevron disclosure.
+- **Themed modals** (`style::dialog_frame`): every dialog (save / open / import / script editor /
+  remote / build / add-component / command palette) is a centered, bordered, shadowed, rounded
+  modal with a title bar and a dimming scrim, replacing the old flat overlays.
+- **Status bar** (`ui/status_bar.rs`): viewport mode, selection count, gizmo, snap, scene name +
+  dirty marker, and FPS.
+- **Toast notifications** (`ui/toast.rs`): `ShowToast` cards (info / success / warning / error)
+  stack bottom-right and auto-dismiss; wired to save / open / import / build feedback.
+- **Command palette** (`ui/command_palette.rs`): `Cmd/Ctrl+P`, fuzzy-filtered, runs any editor
+  action by name.
+- **Console** (`ui/console.rs`): a toggleable bottom log panel (`` ` ``) capturing real `tracing`
+  output via a `LogPlugin` custom layer (`editor_console_layer`), level-colored + monospace.
+- **Light + dark themes** (`ui/theme_switch.rs`): `ToggleTheme` swaps the whole `UiTheme`; the
+  light theme is derived from the dark one by lightness inversion of neutral tokens.
+- **Viewport selection outline** (`viewport/outline.rs`): a wireframe box around each selected
+  entity, plus `F` to frame the selection (3D orbit + 2D pan cameras).
+- **Keyboard shortcuts** (`ui/shortcuts.rs`): Delete, F2, `Cmd/Ctrl+D/S/N/O/P`, W/E/R gizmo
+  modes, F frame, `` ` `` console — suppressed while a text field is focused.
+- **Add-component search** + **inspector axis coloring** (red/green/blue X/Y/Z inputs).
+
+## 15. Robustness + performance — ✅
+- Enum-cycle bounds guard, `is_descendant` cycle-depth cap, `duplicate_entity` half-built
+  cleanup, and silent-failure feedback routed through toasts.
+- `sync_number_fields` only runs during a gizmo drag or play mode (not every frame); undo/redo
+  use a `VecDeque` (O(1) cap); scene open parses fully before clearing the live scene (atomic).
 
 ---
 

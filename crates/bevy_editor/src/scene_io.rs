@@ -17,7 +17,7 @@ use bevy_feathers::controls::{
     ButtonVariant, FeathersButton, FeathersTextInput, FeathersTextInputContainer,
 };
 use bevy_feathers::cursor::EntityCursor;
-use bevy_feathers::display::{label, label_dim};
+use bevy_feathers::display::{icon, label, label_dim};
 use bevy_feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy_feathers::tokens;
 use bevy_image::Image;
@@ -34,21 +34,20 @@ use bevy_sprite::Sprite;
 use bevy_text::EditableText;
 use bevy_transform::components::{GlobalTransform, Transform};
 use bevy_ui::widget::{ImageNode, Text};
-use bevy_ui::{
-    percent, px, AlignItems, Display, FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow,
-    PositionType, UiRect,
-};
-use bevy_ui_widgets::{Activate, ScrollArea};
+use bevy_ui::{px, AlignItems, Display, FlexDirection, JustifyContent, Node, UiRect};
+use bevy_ui_widgets::Activate;
 use bevy_window::SystemCursorIcon;
 use bevy_world_serialization::serde::WorldDeserializer;
 use bevy_world_serialization::DynamicWorldBuilder;
 use serde::de::DeserializeSeed;
 
 use crate::actions::{OpenImportDialog, OpenOpenDialog, OpenSaveDialog, SceneIoRequest, SpawnKind};
-use crate::markers::{EditorEntity, SceneEntity};
+use crate::markers::SceneEntity;
 use crate::spawning::{apply_kind_visuals, spawn_kind, SpawnedAs};
 use crate::state::EditorSelection;
-use crate::ui::{stop_click, AssetContent, CloseOverlay, EditorOverlay, SeedText};
+use crate::ui::icons;
+use crate::ui::style::dialog_frame;
+use crate::ui::{AssetContent, CloseOverlay, SeedText, ShowToast};
 use crate::undo::push_undo;
 
 /// Directory (relative to the working dir) where scene files live.
@@ -63,6 +62,26 @@ const DEFAULT_SCENE: &str = "scene.scn.ron";
 pub struct CurrentScene {
     /// File name (within [`SCENES_DIR`]) of the open scene.
     pub path: Option<String>,
+    /// Whether the scene has unsaved edits since the last save/open.
+    pub dirty: bool,
+}
+
+impl CurrentScene {
+    /// A short, human-friendly name for the status bar / tabs: the file stem with its
+    /// `.scn.ron` suffix stripped, an unsaved marker, and `Untitled` when no path is set.
+    pub fn display_name(&self) -> String {
+        let base = self
+            .path
+            .as_deref()
+            .map(|p| p.trim_end_matches(".scn.ron").trim_end_matches(".ron"))
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Untitled");
+        if self.dirty {
+            format!("{base} *")
+        } else {
+            base.to_string()
+        }
+    }
 }
 
 /// Set when the asset browser list should be rebuilt (startup, or after a save).
@@ -132,31 +151,38 @@ fn on_scene_io(
                     .unwrap_or_else(|| DEFAULT_SCENE.to_string()),
             );
             current.path = Some(name.clone());
+            current.dirty = false;
             browser_dirty.0 = true;
-            commands.queue(move |world: &mut World| {
-                if let Err(err) = write_scene(world, &name) {
-                    error!("Save failed: {err}");
-                }
+            commands.queue(move |world: &mut World| match write_scene(world, &name) {
+                Ok(()) => world.trigger(ShowToast::success(format!("Saved {name}"))),
+                Err(err) => world.trigger(ShowToast::error(format!("Save failed: {err}"))),
             });
         }
         SceneIoRequest::SaveAs(name) => {
             let name = ensure_ext(name.clone());
             current.path = Some(name.clone());
+            current.dirty = false;
             browser_dirty.0 = true;
-            commands.queue(move |world: &mut World| {
-                if let Err(err) = write_scene(world, &name) {
-                    error!("Save failed: {err}");
-                }
+            commands.queue(move |world: &mut World| match write_scene(world, &name) {
+                Ok(()) => world.trigger(ShowToast::success(format!("Saved {name}"))),
+                Err(err) => world.trigger(ShowToast::error(format!("Save failed: {err}"))),
             });
         }
         SceneIoRequest::Open(name) => {
             push_undo(&mut commands);
             current.path = Some(name.clone());
+            current.dirty = false;
             let name = name.clone();
             commands.queue(
                 move |world: &mut World| match open_scene(world, &name, true) {
-                    Ok(n) => info!("Opened scene '{name}' ({n} entities)"),
-                    Err(err) => error!("Failed to open scene '{name}': {err}"),
+                    Ok(n) => {
+                        info!("Opened scene '{name}' ({n} entities)");
+                        world.trigger(ShowToast::success(format!("Opened {name}")));
+                    }
+                    Err(err) => {
+                        error!("Failed to open scene '{name}': {err}");
+                        world.trigger(ShowToast::error(format!("Open failed: {err}")));
+                    }
                 },
             );
         }
@@ -494,93 +520,48 @@ fn on_open_scene_button(
 }
 
 fn save_dialog(initial: String) -> impl Scene {
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        EditorEntity
-        EditorOverlay
-        GlobalZIndex(2000)
-        on(|_: On<Pointer<Click>>, mut c: Commands| { c.trigger(CloseOverlay); })
-        Children [
+    dialog_frame(
+        "Save Scene As",
+        px(380),
+        bsn! {
             (
-                Node {
-                    width: px(320),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: px(10),
-                    row_gap: px(8),
-                }
-                EditorEntity
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                GlobalZIndex(2001)
-                on(stop_click)
+                Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(10) }
                 Children [
-                    (Node { padding: UiRect::axes(px(2), px(2)) } Children [ label("Save Scene As") ]),
                     (@FeathersTextInputContainer Children [
                         (@FeathersTextInput SeedText(initial) SaveNameInput AutoFocus)
                     ]),
                     (
-                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, column_gap: px(8) }
+                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, justify_content: JustifyContent::End, column_gap: px(8) }
                         Children [
-                            (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Save") ThemedText } }
-                                SaveConfirmButton),
                             (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Cancel") ThemedText } }
                                 on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
+                            (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Save") ThemedText } }
+                                SaveConfirmButton),
                         ]
                     ),
                 ]
-            ),
-        ]
-    }
+            )
+        },
+    )
 }
 
 fn open_dialog_overlay() -> impl Scene {
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        EditorEntity
-        EditorOverlay
-        GlobalZIndex(2000)
-        on(|_: On<Pointer<Click>>, mut c: Commands| { c.trigger(CloseOverlay); })
-        Children [
+    dialog_frame(
+        "Open Scene",
+        px(360),
+        bsn! {
             (
-                Node {
-                    width: px(300),
-                    max_height: percent(70),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: px(8),
-                    row_gap: px(4),
-                    overflow: Overflow::scroll_y(),
-                }
-                EditorEntity
+                Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(2) }
                 OpenDialogList
-                ScrollArea
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                GlobalZIndex(2001)
-                on(stop_click)
-                Children [
-                    (Node { padding: UiRect::axes(px(2), px(2)) } Children [ label("Open Scene") ]),
-                ]
-            ),
-        ]
-    }
+            )
+        },
+    )
 }
 
 fn open_dialog_item(name: String) -> impl Scene {
     let display = name.clone();
     bsn! {
-        (@FeathersButton { @variant: ButtonVariant::Plain, @caption: bsn! { Text(display) ThemedText } }
+        (@FeathersButton { @variant: ButtonVariant::Plain, @caption: bsn! { (Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8) } Children [ (icon(icons::FILE) ThemedText), (Text(display) ThemedText) ]) } }
             OpenSceneButton(name))
     }
 }
@@ -621,8 +602,12 @@ fn on_import_confirm(
         Ok(dest) => {
             info!("Imported asset to {dest}");
             browser_dirty.0 = true;
+            commands.trigger(ShowToast::success(format!("Imported {dest}")));
         }
-        Err(err) => error!("Import failed: {err}"),
+        Err(err) => {
+            error!("Import failed: {err}");
+            commands.trigger(ShowToast::error(format!("Import failed: {err}")));
+        }
     }
     commands.trigger(CloseOverlay);
 }
@@ -640,49 +625,30 @@ fn import_file(src: &str) -> Result<String, String> {
 }
 
 fn import_dialog() -> impl Scene {
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        EditorEntity
-        EditorOverlay
-        GlobalZIndex(2000)
-        on(|_: On<Pointer<Click>>, mut c: Commands| { c.trigger(CloseOverlay); })
-        Children [
+    dialog_frame(
+        "Import Asset",
+        px(420),
+        bsn! {
             (
-                Node {
-                    width: px(380),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: px(10),
-                    row_gap: px(8),
-                }
-                EditorEntity
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                GlobalZIndex(2001)
-                on(stop_click)
+                Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(8) }
                 Children [
-                    (Node { padding: UiRect::axes(px(2), px(2)) } Children [ label("Import Asset (path to a file)") ]),
+                    (label_dim("Enter the path to a file to copy into assets/")),
                     (@FeathersTextInputContainer Children [
                         (@FeathersTextInput SeedText(String::new()) ImportPathInput AutoFocus)
                     ]),
                     (
-                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, column_gap: px(8) }
+                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, justify_content: JustifyContent::End, column_gap: px(8) }
                         Children [
-                            (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Import") ThemedText } }
-                                ImportConfirmButton),
                             (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Cancel") ThemedText } }
                                 on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
+                            (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Import") ThemedText } }
+                                ImportConfirmButton),
                         ]
                     ),
                 ]
-            ),
-        ]
-    }
+            )
+        },
+    )
 }
 
 #[cfg(test)]
@@ -779,5 +745,20 @@ mod tests {
         let mut tag_q = dst.query::<&Tag>();
         let values: Vec<i32> = tag_q.iter(&dst).map(|t| t.value).collect();
         assert_eq!(values, vec![42]);
+    }
+
+    #[test]
+    fn current_scene_display_name() {
+        let mut scene = CurrentScene::default();
+        assert_eq!(scene.display_name(), "Untitled");
+
+        scene.path = Some("level1.scn.ron".to_string());
+        assert_eq!(scene.display_name(), "level1");
+
+        scene.dirty = true;
+        assert_eq!(scene.display_name(), "level1 *", "dirty marker shown");
+
+        scene.path = Some("plain.ron".to_string());
+        assert_eq!(scene.display_name(), "plain *");
     }
 }

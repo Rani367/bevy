@@ -18,23 +18,18 @@ use bevy_ecs::prelude::*;
 use bevy_feathers::controls::{
     ButtonVariant, FeathersButton, FeathersTextInput, FeathersTextInputContainer,
 };
-use bevy_feathers::display::label;
-use bevy_feathers::theme::{ThemeBackgroundColor, ThemedText};
-use bevy_feathers::tokens;
+use bevy_feathers::display::{label, label_dim};
+use bevy_feathers::theme::ThemedText;
 use bevy_input_focus::AutoFocus;
 use bevy_log::{error, info};
-use bevy_picking::events::{Click, Pointer};
 use bevy_scene::prelude::*;
 use bevy_text::EditableText;
 use bevy_ui::widget::Text;
-use bevy_ui::{
-    percent, px, AlignItems, Display, FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow,
-    PositionType, UiRect,
-};
-use bevy_ui_widgets::{Activate, ScrollArea};
+use bevy_ui::{px, Display, FlexDirection, JustifyContent, Node};
+use bevy_ui_widgets::Activate;
 
-use crate::markers::EditorEntity;
-use crate::ui::{stop_click, CloseOverlay, EditorOverlay, SeedText};
+use crate::ui::style::dialog_frame;
+use crate::ui::{CloseOverlay, SeedText};
 
 /// Default BRP endpoint (matches `bevy_remote`'s defaults).
 const DEFAULT_REMOTE: &str = "127.0.0.1:15702";
@@ -303,80 +298,42 @@ pub fn parse_entity_ids(body: &str) -> Vec<u64> {
 // ---------------------------------------------------------------------------
 
 fn connect_dialog() -> impl Scene {
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        EditorEntity
-        EditorOverlay
-        GlobalZIndex(2000)
-        on(|_: On<Pointer<Click>>, mut c: Commands| { c.trigger(CloseOverlay); })
-        Children [
+    dialog_frame(
+        "Connect to Remote",
+        px(420),
+        bsn! {
             (
-                Node {
-                    width: px(360),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: px(10),
-                    row_gap: px(8),
-                }
-                EditorEntity
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                GlobalZIndex(2001)
-                on(stop_click)
+                Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(8) }
                 Children [
-                    (Node { padding: UiRect::axes(px(2), px(2)) } Children [ label("Connect to Remote (BRP host:port)") ]),
+                    (label_dim("Bevy Remote Protocol host:port")),
                     (@FeathersTextInputContainer Children [
                         (@FeathersTextInput SeedText(String::from(DEFAULT_REMOTE)) ConnectUrlInput AutoFocus)
                     ]),
                     (
-                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, column_gap: px(8) }
+                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, justify_content: JustifyContent::End, column_gap: px(8) }
                         Children [
-                            (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Connect") ThemedText } }
-                                ConnectConfirmButton),
                             (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Cancel") ThemedText } }
                                 on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
+                            (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Connect") ThemedText } }
+                                ConnectConfirmButton),
                         ]
                     ),
                 ]
-            ),
-        ]
-    }
+            )
+        },
+    )
 }
 
 /// The remote-actions overlay: the connection summary plus spawn / despawn / refresh edits.
 fn remote_overlay(message: String) -> impl Scene {
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        EditorEntity
-        EditorOverlay
-        GlobalZIndex(2000)
-        on(|_: On<Pointer<Click>>, mut c: Commands| { c.trigger(CloseOverlay); })
-        Children [
+    dialog_frame(
+        "Remote Editing",
+        px(420),
+        bsn! {
             (
-                Node {
-                    width: px(380),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: px(12),
-                    row_gap: px(10),
-                }
-                EditorEntity
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                GlobalZIndex(2001)
-                on(stop_click)
+                Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(10) }
                 Children [
-                    (Node { padding: UiRect::axes(px(2), px(2)) } Children [ label(message) ]),
+                    (label(message)),
                     (
                         Node { display: Display::Flex, flex_direction: FlexDirection::Row, column_gap: px(6), flex_wrap: bevy_ui::FlexWrap::Wrap, row_gap: px(6) }
                         Children [
@@ -391,48 +348,31 @@ fn remote_overlay(message: String) -> impl Scene {
                         ]
                     ),
                 ]
-            ),
-        ]
-    }
+            )
+        },
+    )
 }
 
 /// A centered modal showing a message with a Close button.
 fn message_overlay(message: &str) -> impl Scene {
     let message = message.to_string();
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        EditorEntity
-        EditorOverlay
-        GlobalZIndex(2000)
-        on(|_: On<Pointer<Click>>, mut c: Commands| { c.trigger(CloseOverlay); })
-        Children [
+    dialog_frame(
+        "Remote",
+        px(380),
+        bsn! {
             (
-                Node {
-                    width: px(360),
-                    max_height: percent(60),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: px(12),
-                    row_gap: px(10),
-                    overflow: Overflow::scroll_y(),
-                }
-                EditorEntity
-                ScrollArea
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                GlobalZIndex(2001)
-                on(stop_click)
+                Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(10) }
                 Children [
-                    (Node { padding: UiRect::axes(px(2), px(2)) } Children [ label(message) ]),
-                    (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Close") ThemedText } }
-                        on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
+                    (label(message)),
+                    (
+                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, justify_content: JustifyContent::End }
+                        Children [
+                            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Close") ThemedText } }
+                                on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
+                        ]
+                    ),
                 ]
-            ),
-        ]
-    }
+            )
+        },
+    )
 }

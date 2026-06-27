@@ -18,7 +18,7 @@ use bevy_feathers::controls::{
     ButtonVariant, FeathersButton, FeathersTextInput, FeathersTextInputContainer,
 };
 use bevy_feathers::cursor::EntityCursor;
-use bevy_feathers::display::label;
+use bevy_feathers::display::{icon, label};
 use bevy_feathers::theme::{ThemeBackgroundColor, ThemedText};
 use bevy_feathers::tokens;
 use bevy_input::keyboard::KeyCode;
@@ -43,12 +43,14 @@ use bevy_ui_widgets::Activate;
 use bevy_window::SystemCursorIcon;
 
 use crate::actions::{
-    DeleteSelectedRequest, DuplicateRequest, RenameRequest, ReparentRequest, SpawnRequest,
+    DeleteSelectedRequest, DuplicateRequest, RenameRequest, ReparentRequest, SpawnKind,
+    SpawnRequest,
 };
 use crate::markers::{EditorEntity, SceneEntity};
-use crate::spawning::{default_name, spawn_kind};
+use crate::spawning::{default_name, spawn_kind, SpawnedAs};
 use crate::state::EditorSelection;
-use crate::ui::{read_text_input, HierarchyContent, SeedText};
+use crate::ui::style::etokens;
+use crate::ui::{icons, read_text_input, HierarchyContent, SeedText};
 use crate::undo::push_undo;
 
 /// Component placed on a hierarchy row UI node, pointing back at the scene entity it
@@ -155,6 +157,7 @@ fn rebuild_hierarchy(
     children_q: Query<&Children>,
     scene_q: Query<(), With<SceneEntity>>,
     name_q: Query<&Name>,
+    spawned_q: Query<&SpawnedAs>,
     selection: Res<EditorSelection>,
     collapsed: Res<CollapsedNodes>,
     renaming: Res<Renaming>,
@@ -187,6 +190,7 @@ fn rebuild_hierarchy(
             if renaming.0 == Some(entity) {
                 Box::new(EntityScene(rename_row(entity, name, depth))) as Box<dyn SceneList>
             } else {
+                let kind = spawned_q.get(entity).ok().map(|s| s.0);
                 Box::new(EntityScene(normal_row(
                     entity,
                     name,
@@ -194,6 +198,7 @@ fn rebuild_hierarchy(
                     selection.contains(entity),
                     has_children,
                     collapsed.0.contains(&entity),
+                    kind,
                 )))
             }
         })
@@ -230,6 +235,19 @@ fn push_subtree(
 
 /// One row of the hierarchy tree: a disclosure toggle (when it has children) plus an
 /// indented, clickable label.
+/// Maps a spawned entity's kind to a hierarchy row icon, so the tree reads at a glance.
+fn kind_icon(kind: Option<SpawnKind>) -> &'static str {
+    match kind {
+        Some(SpawnKind::Cube) => icons::CUBE,
+        Some(SpawnKind::Sphere) => icons::SPHERE,
+        Some(SpawnKind::Plane) => icons::SQUARE,
+        Some(SpawnKind::PointLight) => icons::LIGHT,
+        Some(SpawnKind::DirectionalLight) => icons::DIR_LIGHT,
+        Some(SpawnKind::Sprite) => icons::SPRITE,
+        Some(SpawnKind::Empty) | None => icons::EMPTY,
+    }
+}
+
 fn normal_row(
     entity: Entity,
     name: String,
@@ -237,23 +255,28 @@ fn normal_row(
     selected: bool,
     has_children: bool,
     collapsed: bool,
+    kind: Option<SpawnKind>,
 ) -> impl Scene {
     let bg = if selected {
-        tokens::MENUITEM_BG_FOCUSED
+        etokens::ROW_SELECTED
     } else {
         tokens::PANE_BODY_BG
     };
     let indent = px(4.0 + depth as f32 * 14.0);
-    let glyph = if !has_children {
-        " "
-    } else if collapsed {
-        "\u{25B8}" // ▸
+    // A rotating chevron for branches; leaves get a blank spacer of the same width.
+    let disclosure: Box<dyn SceneList> = if has_children {
+        let chevron = if collapsed {
+            icons::CHEVRON_RIGHT
+        } else {
+            icons::CHEVRON_DOWN
+        };
+        Box::new(bsn_list![(icon(chevron) ThemedText Pickable::IGNORE)])
     } else {
-        "\u{25BE}" // ▾
+        Box::new(bsn_list![])
     };
     bsn! {
         Node {
-            min_height: px(20),
+            min_height: px(22),
             padding: UiRect {
                 left: indent,
                 right: px(4),
@@ -261,7 +284,7 @@ fn normal_row(
                 bottom: px(2),
             },
             align_items: AlignItems::Center,
-            column_gap: px(2),
+            column_gap: px(4),
         }
         ThemeBackgroundColor(bg)
         HierarchyRow(entity)
@@ -272,8 +295,9 @@ fn normal_row(
                 Node { min_width: px(14), align_items: AlignItems::Center }
                 RowDisclosure(entity)
                 on(on_disclosure_click)
-                Children [ (label(glyph) Pickable::IGNORE) ]
+                Children [ {disclosure} ]
             ),
+            (icon(kind_icon(kind)) ThemedText Pickable::IGNORE),
             (label(name) Pickable::IGNORE),
         ]
     }
@@ -390,7 +414,7 @@ fn highlight_rows(
     }
     for (ui_entity, row, bg) in rows.iter() {
         let token = if selection.contains(row.0) {
-            tokens::MENUITEM_BG_FOCUSED
+            etokens::ROW_SELECTED
         } else {
             tokens::PANE_BODY_BG
         };
@@ -601,6 +625,7 @@ fn duplicate_entity(world: &mut World, src: Entity) -> Option<Entity> {
         .collect();
 
     let dst = world.spawn_empty().id();
+    let mut aborted = false;
     {
         let registry = registry_arc.read();
         for tid in type_ids {
@@ -612,6 +637,8 @@ fn duplicate_entity(world: &mut World, src: Entity) -> Option<Entity> {
             };
             let cloned = {
                 let Ok(src_ref) = world.get_entity(src) else {
+                    // The source vanished mid-clone; abandon the half-built duplicate.
+                    aborted = true;
                     break;
                 };
                 reflect_component
@@ -623,6 +650,12 @@ fn duplicate_entity(world: &mut World, src: Entity) -> Option<Entity> {
                 reflect_component.insert(&mut dst_mut, &*value, &registry);
             }
         }
+    }
+    if aborted {
+        if let Ok(dst_mut) = world.get_entity_mut(dst) {
+            dst_mut.despawn();
+        }
+        return None;
     }
 
     if let Some(parent) = parent {
@@ -659,16 +692,23 @@ fn on_reparent_request(
     dirty.0 = true;
 }
 
-/// Whether `candidate` is `root` itself or one of its descendants.
+/// Whether `candidate` is `root` itself or one of its descendants. The `depth` cap guards
+/// against an accidental `ChildOf` cycle hanging the editor.
 fn is_descendant(candidate: Entity, root: Entity, children_q: &Query<&Children>) -> bool {
-    if let Ok(children) = children_q.get(root) {
-        for child in children.iter() {
-            if child == candidate || is_descendant(candidate, child, children_q) {
-                return true;
+    fn walk(candidate: Entity, root: Entity, children_q: &Query<&Children>, depth: u32) -> bool {
+        if depth > 4096 {
+            return false;
+        }
+        if let Ok(children) = children_q.get(root) {
+            for child in children.iter() {
+                if child == candidate || walk(candidate, child, children_q, depth + 1) {
+                    return true;
+                }
             }
         }
+        false
     }
-    false
+    walk(candidate, root, children_q, 0)
 }
 
 /// Drop one row onto another → reparent the dragged entity under the target.

@@ -18,11 +18,10 @@ use bevy_feathers::controls::{
     ButtonVariant, FeathersButton, FeathersCheckbox, FeathersNumberInput, FeathersTextInput,
     FeathersTextInputContainer, NumberInputPrecision, NumberInputValue,
 };
-use bevy_feathers::display::{label, label_dim, label_small};
-use bevy_feathers::theme::{ThemeBackgroundColor, ThemedText};
+use bevy_feathers::display::{icon, label, label_dim, label_small};
+use bevy_feathers::theme::{ThemeBackgroundColor, ThemeToken, ThemedText};
 use bevy_feathers::tokens;
 use bevy_input_focus::InputFocus;
-use bevy_picking::events::{Click, Pointer};
 use bevy_reflect::enums::{DynamicEnum, DynamicVariant, VariantInfo};
 use bevy_reflect::std_traits::ReflectDefault;
 use bevy_reflect::tuple::DynamicTuple;
@@ -33,16 +32,13 @@ use bevy_scene::prelude::*;
 use bevy_scene::EntityScene;
 use bevy_text::EditableText;
 use bevy_ui::widget::Text;
-use bevy_ui::{
-    percent, px, AlignItems, Checked, Display, FlexDirection, GlobalZIndex, Node, Overflow,
-    PositionType, UiRect,
-};
-use bevy_ui_widgets::{Activate, ScrollArea, ValueChange};
+use bevy_ui::{px, AlignItems, Checked, Display, FlexDirection, Node, UiRect};
+use bevy_ui_widgets::{Activate, ValueChange};
 
-use crate::markers::EditorEntity;
 use crate::scripting::{BehaviorScript, OpenScriptEditor};
 use crate::state::EditorSelection;
-use crate::ui::{InspectorContent, SeedText};
+use crate::ui::style::dialog_frame;
+use crate::ui::{icons, InspectorContent, SeedText};
 use crate::undo::push_undo;
 
 /// A numeric field's concrete type, so edits can be written back to the right Rust type.
@@ -174,18 +170,21 @@ impl Default for RemoveComponentButton {
 #[derive(Component, Clone, Copy, Default)]
 struct InitChecked(bool);
 
-/// Marks the "Add Component" overlay backdrop, and the list container within it.
-#[derive(Component, Default, Clone, Copy)]
-struct InspectorOverlay;
+/// The list container within the "Add Component" dialog.
 #[derive(Component, Default, Clone, Copy)]
 struct AddComponentList;
+/// The search input in the "Add Component" dialog.
+#[derive(Component, Default, Clone, Copy)]
+struct AddComponentSearch;
+
+/// The full set of addable components (name + type), cached while the dialog is open so the
+/// search filter doesn't re-scan the registry on every keystroke.
+#[derive(Resource, Default)]
+struct AddComponentItems(Vec<(String, TypeId)>);
 
 /// Request to open the "Add Component" dialog.
 #[derive(Event, Clone, Copy)]
 struct OpenAddComponentDialog;
-/// Request to close the inspector overlay.
-#[derive(Event, Clone, Copy)]
-struct CloseInspectorOverlay;
 
 /// Set when the inspector should be rebuilt (selection changed or components changed).
 #[derive(Resource, Default)]
@@ -209,9 +208,10 @@ impl Plugin for InspectorPlugin {
                 Update,
                 (
                     (mark_inspector_dirty, rebuild_inspector).chain(),
-                    sync_number_fields,
+                    sync_number_fields.run_if(transform_may_change_externally),
                     commit_string_fields,
                     apply_init_checked,
+                    filter_add_component,
                 ),
             )
             .add_observer(on_f32_changed)
@@ -223,8 +223,7 @@ impl Plugin for InspectorPlugin {
             .add_observer(on_open_add_component)
             .add_observer(on_add_component_button)
             .add_observer(on_remove_component_button)
-            .add_observer(on_script_edit_button)
-            .add_observer(on_close_inspector_overlay);
+            .add_observer(on_script_edit_button);
     }
 }
 
@@ -724,7 +723,7 @@ fn component_header(name: String, target: Entity, type_id: TypeId) -> impl Scene
         ThemeBackgroundColor(tokens::GROUP_HEADER_BG)
         Children [
             label(name),
-            (@FeathersButton { @variant: ButtonVariant::Plain, @caption: bsn! { Text("x") ThemedText } }
+            (@FeathersButton { @variant: ButtonVariant::Plain, @caption: bsn! { (icon(icons::X)) } }
                 RemoveComponentButton { target: target, type_id: type_id }),
         ]
     }
@@ -763,11 +762,20 @@ fn number_field(
         _ => NumberInputValue::F32(value as f32),
     };
     let precision = if ty.is_integer() { 0 } else { 3 };
+    let sigil = axis_sigil(&field_label, ty);
+    // For axis components (x/y/z/w), show the letter inside the colored input (Unity-style)
+    // and drop the redundant left label; everything else keeps its caption column.
+    let axis = axis_label(&field_label);
+    let row_label = if axis.is_some() {
+        String::new()
+    } else {
+        field_label
+    };
     field_row(
-        field_label,
+        row_label,
         bsn! {
             (
-                @FeathersNumberInput
+                @FeathersNumberInput { @sigil_color: sigil, @label_text: axis }
                 template_value(niv)
                 NumberInputPrecision(precision)
                 FieldBinding { target: target, component: component, path: path, kind: FieldKind::Num(ty), variants: Vec::new(), op: op }
@@ -775,6 +783,33 @@ fn number_field(
             )
         },
     )
+}
+
+/// The colored left-edge "sigil" for a number field: red/green/blue for X/Y/Z axes and the
+/// R/G/B color channels, transparent otherwise. Mirrors Unity/Godot axis coloring.
+fn axis_sigil(label: &str, ty: NumTy) -> ThemeToken {
+    match ty {
+        NumTy::ColorR => tokens::TEXT_INPUT_X_AXIS,
+        NumTy::ColorG => tokens::TEXT_INPUT_Y_AXIS,
+        NumTy::ColorB => tokens::TEXT_INPUT_Z_AXIS,
+        _ => match label {
+            "x" | "X" => tokens::TEXT_INPUT_X_AXIS,
+            "y" | "Y" => tokens::TEXT_INPUT_Y_AXIS,
+            "z" | "Z" => tokens::TEXT_INPUT_Z_AXIS,
+            _ => tokens::TEXT_INPUT_BG,
+        },
+    }
+}
+
+/// The in-input axis letter for an `x`/`y`/`z`/`w` field, if it is one.
+fn axis_label(label: &str) -> Option<&'static str> {
+    match label {
+        "x" | "X" => Some("X"),
+        "y" | "Y" => Some("Y"),
+        "z" | "Z" => Some("Z"),
+        "w" | "W" => Some("W"),
+        _ => None,
+    }
 }
 
 fn bool_field(
@@ -898,7 +933,7 @@ fn script_edit_button(target: Entity) -> impl Scene {
     bsn! {
         Node { padding: UiRect::axes(px(6), px(3)) }
         Children [
-            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Edit Script \u{29C9}") ThemedText } }
+            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { (Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(6) } Children [ (icon(icons::CODE) ThemedText), (Text("Edit Script") ThemedText) ]) } }
                 ScriptEditButton(target)),
         ]
     }
@@ -1304,6 +1339,9 @@ fn cycle_enum(
     path: &str,
     variants: &[String],
 ) {
+    if variants.is_empty() {
+        return;
+    }
     let Some(rc) = reflect_component_for(world, component) else {
         return;
     };
@@ -1319,7 +1357,9 @@ fn cycle_enum(
         .and_then(|c| variants.iter().position(|v| *v == c))
         .map(|i| (i + 1) % variants.len())
         .unwrap_or(0);
-    let next_name = variants[next].clone();
+    let Some(next_name) = variants.get(next).cloned() else {
+        return;
+    };
 
     if let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target))
         && let Ok(field) = reflected.reflect_path_mut(path)
@@ -1379,6 +1419,16 @@ fn apply_init_checked(
 
 /// Keep `f32` number inputs in sync with the world when the bound entity changes
 /// elsewhere (e.g. a gizmo drag). Skips the focused widget so it doesn't clobber typing.
+/// `sync_number_fields` only needs to run when something *other* than the inspector can move
+/// the inspected values: a live gizmo drag, or play-mode scripts. Selection changes already
+/// rebuild the panel with fresh values, so the rest of the time this work is skipped.
+fn transform_may_change_externally(
+    drag: Res<crate::state::GizmoDrag>,
+    state: Res<bevy_state::state::State<crate::state::EditorState>>,
+) -> bool {
+    drag.active || *state.get() == crate::state::EditorState::Playing
+}
+
 fn sync_number_fields(world: &mut World) {
     let focus = world.resource::<InputFocus>().get();
 
@@ -1432,8 +1482,9 @@ fn on_open_add_component(_: On<OpenAddComponentDialog>, mut commands: Commands) 
     commands.queue(open_add_component_dialog);
 }
 
-/// Build the modal "Add Component" list from every registered type that has both
-/// `ReflectComponent` and `ReflectDefault` (so it can be default-constructed).
+/// Build the modal "Add Component" dialog from every registered type that has both
+/// `ReflectComponent` and `ReflectDefault` (so it can be default-constructed). The full list
+/// is cached in [`AddComponentItems`] for the live search filter.
 fn open_add_component_dialog(world: &mut World) {
     let registry_arc = world.resource::<AppTypeRegistry>().0.clone();
     let mut items: Vec<(String, TypeId)> = {
@@ -1451,6 +1502,7 @@ fn open_add_component_dialog(world: &mut World) {
             .collect()
     };
     items.sort_by(|a, b| a.0.cmp(&b.0));
+    world.insert_resource(AddComponentItems(items.clone()));
 
     let _ = world.spawn_scene(add_component_overlay());
 
@@ -1458,52 +1510,59 @@ fn open_add_component_dialog(world: &mut World) {
     let Some(list) = list_q.iter(world).next() else {
         return;
     };
-    let buttons: Vec<Box<dyn SceneList>> = items
-        .into_iter()
-        .map(|(name, tid)| {
-            Box::new(EntityScene(add_component_item(name, tid))) as Box<dyn SceneList>
-        })
-        .collect();
+    let buttons = add_component_rows(&items, "");
     world
         .entity_mut(list)
         .queue_spawn_related_scenes::<Children>(buttons);
 }
 
+/// Build the (filtered) result rows for the add-component list, capped so a blank query
+/// doesn't spawn hundreds of nodes.
+fn add_component_rows(items: &[(String, TypeId)], query: &str) -> Vec<Box<dyn SceneList>> {
+    let query = query.to_lowercase();
+    items
+        .iter()
+        .filter(|(name, _)| query.is_empty() || name.to_lowercase().contains(&query))
+        .take(60)
+        .map(|(name, tid)| {
+            Box::new(EntityScene(add_component_item(name.clone(), *tid))) as Box<dyn SceneList>
+        })
+        .collect()
+}
+
+/// Re-filter the add-component list as the search text changes.
+fn filter_add_component(
+    search: Query<&EditableText, (With<AddComponentSearch>, Changed<EditableText>)>,
+    items: Option<Res<AddComponentItems>>,
+    list: Query<Entity, With<AddComponentList>>,
+    mut commands: Commands,
+) {
+    let (Ok(text), Some(items), Ok(container)) = (search.single(), items, list.single()) else {
+        return;
+    };
+    let rows = add_component_rows(&items.0, &text.value().to_string());
+    commands.entity(container).despawn_children();
+    commands
+        .entity(container)
+        .queue_spawn_related_scenes::<Children>(rows);
+}
+
 fn add_component_overlay() -> impl Scene {
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: bevy_ui::JustifyContent::Center,
-        }
-        EditorEntity
-        InspectorOverlay
-        GlobalZIndex(2000)
-        on(|_: On<Pointer<Click>>, mut c: Commands| { c.trigger(CloseInspectorOverlay); })
-        Children [
+    dialog_frame(
+        "Add Component",
+        px(360),
+        bsn! {
             (
-                Node {
-                    width: px(280),
-                    max_height: percent(70),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: px(6),
-                    row_gap: px(4),
-                    overflow: Overflow::scroll_y(),
-                }
-                EditorEntity
-                AddComponentList
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                GlobalZIndex(2001)
-                ScrollArea
+                Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(8) }
                 Children [
-                    (Node { padding: UiRect::axes(px(4), px(2)) } Children [ label("Add Component") ]),
+                    (@FeathersTextInputContainer Children [
+                        (@FeathersTextInput SeedText(String::new()) AddComponentSearch bevy_input_focus::AutoFocus)
+                    ]),
+                    (Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(2) } AddComponentList),
                 ]
-            ),
-        ]
-    }
+            )
+        },
+    )
 }
 
 fn add_component_item(name: String, type_id: TypeId) -> impl Scene {
@@ -1531,7 +1590,7 @@ fn on_add_component_button(
         add_component_default(world, target, type_id);
         world.resource_mut::<InspectorDirty>().0 = true;
     });
-    commands.trigger(CloseInspectorOverlay);
+    commands.trigger(crate::ui::CloseOverlay);
 }
 
 fn add_component_default(world: &mut World, target: Entity, type_id: TypeId) {
@@ -1575,27 +1634,54 @@ fn on_remove_component_button(
     });
 }
 
-fn on_close_inspector_overlay(
-    _: On<CloseInspectorOverlay>,
-    overlays: Query<Entity, With<InspectorOverlay>>,
-    mut commands: Commands,
-) {
-    for overlay in overlays.iter() {
-        commands.entity(overlay).despawn();
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{apply_element_patch, apply_structural, FieldOp};
+    use super::{
+        add_component_rows, apply_element_patch, apply_structural, axis_sigil, FieldOp, NumTy,
+    };
     use alloc::collections::BTreeMap;
+    use bevy_feathers::tokens;
     use bevy_reflect::TypeRegistry;
+    use core::any::TypeId;
 
     fn registry() -> TypeRegistry {
         let mut r = TypeRegistry::default();
         r.register::<f32>();
         r.register::<String>();
         r
+    }
+
+    #[test]
+    fn axis_sigil_colors_xyz_and_rgb() {
+        assert_eq!(axis_sigil("x", NumTy::F32), tokens::TEXT_INPUT_X_AXIS);
+        assert_eq!(axis_sigil("y", NumTy::F32), tokens::TEXT_INPUT_Y_AXIS);
+        assert_eq!(axis_sigil("z", NumTy::F32), tokens::TEXT_INPUT_Z_AXIS);
+        assert_eq!(axis_sigil("w", NumTy::F32), tokens::TEXT_INPUT_BG);
+        assert_eq!(
+            axis_sigil("anything", NumTy::ColorR),
+            tokens::TEXT_INPUT_X_AXIS
+        );
+        assert_eq!(
+            axis_sigil("anything", NumTy::ColorG),
+            tokens::TEXT_INPUT_Y_AXIS
+        );
+    }
+
+    #[test]
+    fn add_component_rows_filter_and_cap() {
+        let many: Vec<(String, TypeId)> = (0..100)
+            .map(|i| (format!("Comp{i}"), TypeId::of::<f32>()))
+            .collect();
+        // A blank query is capped so we don't spawn hundreds of nodes.
+        assert_eq!(add_component_rows(&many, "").len(), 60);
+
+        let two = vec![
+            ("Transform".to_string(), TypeId::of::<f32>()),
+            ("MeshMaterial".to_string(), TypeId::of::<f32>()),
+        ];
+        assert_eq!(add_component_rows(&two, "trans").len(), 1);
+        assert_eq!(add_component_rows(&two, "MESH").len(), 1); // case-insensitive
+        assert_eq!(add_component_rows(&two, "zzz").len(), 0);
     }
 
     #[test]

@@ -2,12 +2,33 @@
 //! Viewport / Inspector / Asset panels) built with `bevy_feathers` and the `bsn!`
 //! scene macro, plus the custom splitter widget Feathers doesn't provide.
 
+pub mod command_palette;
+pub mod console;
 pub mod docking;
+pub mod icons;
 mod shell;
+pub mod shortcuts;
 mod splitter;
+pub mod status_bar;
+pub mod style;
+pub mod theme_switch;
+pub mod toast;
 
 pub use docking::{DockState, Panel, PanelContent, PanelId};
 pub use splitter::{ResizeSide, Splitter};
+pub use toast::{ShowToast, ToastLevel};
+
+/// Toggle between the light and dark editor themes. Handled by the theme-switch plugin.
+#[derive(Event, Clone, Copy)]
+pub struct ToggleTheme;
+
+/// Toggle the console / log panel. Handled by the console plugin.
+#[derive(Event, Clone, Copy)]
+pub struct ToggleConsole;
+
+/// Open the command palette. Handled by the command-palette plugin.
+#[derive(Event, Clone, Copy)]
+pub struct OpenCommandPalette;
 
 use bevy_app::{App, Plugin, Startup, Update};
 use bevy_ecs::prelude::*;
@@ -120,9 +141,24 @@ pub struct EditorUiPlugin;
 
 impl Plugin for EditorUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(docking::DockingPlugin)
-            .add_systems(Startup, shell::editor_shell.spawn())
-            .add_systems(Update, (seed_text_inputs, close_overlay_on_escape))
-            .add_observer(on_close_overlay);
+        app.add_plugins((
+            docking::DockingPlugin,
+            status_bar::StatusBarPlugin,
+            theme_switch::ThemeSwitchPlugin,
+            shortcuts::ShortcutsPlugin,
+            toast::ToastPlugin,
+            command_palette::CommandPalettePlugin,
+            console::ConsolePlugin,
+        ))
+        .add_systems(Startup, shell::editor_shell.spawn())
+        .add_systems(
+            Update,
+            (
+                seed_text_inputs,
+                close_overlay_on_escape,
+                shell::sync_toolbar_active,
+            ),
+        )
+        .add_observer(on_close_overlay);
     }
 }

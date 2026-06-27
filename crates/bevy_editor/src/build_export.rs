@@ -12,21 +12,16 @@ use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use bevy_feathers::controls::{ButtonVariant, FeathersButton};
 use bevy_feathers::display::label;
-use bevy_feathers::theme::{ThemeBackgroundColor, ThemedText};
-use bevy_feathers::tokens;
+use bevy_feathers::theme::ThemedText;
 use bevy_log::{error, info};
-use bevy_picking::events::{Click, Pointer};
 use bevy_scene::prelude::*;
 use bevy_ui::widget::Text;
-use bevy_ui::{
-    percent, px, AlignItems, Display, FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow,
-    PositionType, UiRect,
-};
-use bevy_ui_widgets::{Activate, ScrollArea};
+use bevy_ui::{px, Display, FlexDirection, JustifyContent, Node};
+use bevy_ui_widgets::Activate;
 
 use crate::actions::SceneIoRequest;
-use crate::markers::EditorEntity;
-use crate::ui::{stop_click, CloseOverlay, EditorOverlay};
+use crate::ui::style::dialog_frame;
+use crate::ui::{CloseOverlay, ShowToast};
 
 /// Request to build the host project via `cargo build`.
 #[derive(Event, Clone, Copy)]
@@ -64,8 +59,8 @@ impl Plugin for BuildExportPlugin {
 
 /// Export = save the current scene to its file.
 fn on_export_scene(_: On<ExportSceneRequest>, mut commands: Commands) {
+    // Save emits its own success/failure toast.
     commands.trigger(SceneIoRequest::Save);
-    commands.spawn_scene(status_overlay("Scene exported to assets/scenes/."));
 }
 
 /// Kick off `cargo build --release` on a worker thread (unless one is already running).
@@ -142,18 +137,20 @@ fn poll_build(mut status: ResMut<BuildStatus>, mut commands: Commands) {
     let taken = status.result.lock().unwrap().take();
     if let Some(output) = taken {
         status.running = false;
+        commands.trigger(CloseOverlay);
         if output.success {
             info!("Build succeeded: {}", output.summary);
+            commands.trigger(ShowToast::success(format!(
+                "Build succeeded — {}",
+                output.summary
+            )));
         } else {
             error!("Build failed: {}", output.summary);
+            commands.trigger(ShowToast::error(format!(
+                "Build failed — {}",
+                output.summary
+            )));
         }
-        commands.trigger(CloseOverlay);
-        let label = if output.success {
-            format!("Build succeeded\n{}", output.summary)
-        } else {
-            format!("Build failed\n{}", output.summary)
-        };
-        commands.spawn_scene(status_overlay(&label));
     }
 }
 
@@ -213,42 +210,25 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// A centered modal showing a status message with a Close button.
 fn status_overlay(message: &str) -> impl Scene {
     let message = message.to_string();
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        EditorEntity
-        EditorOverlay
-        GlobalZIndex(2000)
-        on(|_: On<Pointer<Click>>, mut c: Commands| { c.trigger(CloseOverlay); })
-        Children [
+    dialog_frame(
+        "Build",
+        px(420),
+        bsn! {
             (
-                Node {
-                    width: px(360),
-                    max_height: percent(60),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: px(12),
-                    row_gap: px(10),
-                    overflow: Overflow::scroll_y(),
-                }
-                EditorEntity
-                ScrollArea
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                GlobalZIndex(2001)
-                on(stop_click)
+                Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(10) }
                 Children [
-                    (Node { padding: UiRect::axes(px(2), px(2)) } Children [ label(message) ]),
-                    (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Close") ThemedText } }
-                        on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
+                    (label(message)),
+                    (
+                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, justify_content: JustifyContent::End }
+                        Children [
+                            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Close") ThemedText } }
+                                on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
+                        ]
+                    ),
                 ]
-            ),
-        ]
-    }
+            )
+        },
+    )
 }
 
 #[cfg(test)]

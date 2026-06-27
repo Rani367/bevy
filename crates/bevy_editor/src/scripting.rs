@@ -31,8 +31,7 @@ use bevy_ecs::prelude::*;
 use bevy_feathers::controls::{
     ButtonVariant, FeathersButton, FeathersTextInput, FeathersTextInputContainer,
 };
-use bevy_feathers::theme::{ThemeBackgroundColor, ThemedText};
-use bevy_feathers::tokens;
+use bevy_feathers::theme::ThemedText;
 use bevy_input_focus::AutoFocus;
 use bevy_reflect::std_traits::ReflectDefault;
 use bevy_reflect::Reflect;
@@ -42,15 +41,12 @@ use bevy_text::EditableText;
 use bevy_time::Time;
 use bevy_transform::components::Transform;
 use bevy_ui::widget::Text;
-use bevy_ui::{
-    percent, px, AlignItems, Display, FlexDirection, GlobalZIndex, JustifyContent, Node,
-    PositionType, UiRect,
-};
+use bevy_ui::{px, Display, FlexDirection, JustifyContent, Node};
 use bevy_ui_widgets::Activate;
 
-use crate::markers::EditorEntity;
 use crate::state::EditorState;
-use crate::ui::{stop_click, CloseOverlay, EditorOverlay, MultilineSeed, SeedText};
+use crate::ui::style::dialog_frame;
+use crate::ui::{CloseOverlay, MultilineSeed, SeedText};
 
 /// A behavior program that animates its entity's transform during play mode. See the module
 /// docs for the language.
@@ -198,37 +194,17 @@ fn on_script_save(
     commands.trigger(CloseOverlay);
 }
 
-/// A centered overlay hosting a multi-line text editor bound to `entity`'s script.
+/// A centered modal hosting a multi-line text editor bound to `entity`'s script.
 fn script_editor(entity: Entity, source: String) -> impl Scene {
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-        }
-        EditorEntity
-        EditorOverlay
-        GlobalZIndex(2000)
-        on(|_: On<bevy_picking::events::Pointer<bevy_picking::events::Click>>, mut c: Commands| { c.trigger(CloseOverlay); })
-        Children [
+    dialog_frame(
+        "Script Editor",
+        px(520),
+        bsn! {
             (
-                Node {
-                    width: px(460),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: px(12),
-                    row_gap: px(8),
-                }
-                EditorEntity
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                GlobalZIndex(2001)
-                on(stop_click)
+                Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(10) }
                 Children [
-                    (Node { padding: UiRect::axes(px(2), px(2)) } Children [ label_title("Script Editor") ]),
                     (@FeathersTextInputContainer
-                        Node { min_height: px(160) }
+                        Node { min_height: px(220) }
                         Children [
                             (@FeathersTextInput
                                 SeedText(source)
@@ -237,21 +213,16 @@ fn script_editor(entity: Entity, source: String) -> impl Scene {
                                 AutoFocus)
                         ]),
                     (
-                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, column_gap: px(8) }
+                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, justify_content: JustifyContent::End, column_gap: px(8) }
                         Children [
-                            (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Save") ThemedText } }
-                                ScriptSaveButton(entity)),
                             (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Cancel") ThemedText } }
                                 on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
+                            (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Save") ThemedText } }
+                                ScriptSaveButton(entity)),
                         ]
                     ),
                 ]
-            ),
-        ]
-    }
-}
-
-fn label_title(text: &str) -> impl Scene {
-    let text = text.to_string();
-    bsn! { (Text(text) ThemedText) }
+            )
+        },
+    )
 }

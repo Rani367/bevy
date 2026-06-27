@@ -5,6 +5,7 @@
 mod camera;
 mod gizmos;
 mod grid;
+mod outline;
 mod picking;
 
 pub use camera::{Editor2dCamera, Editor3dCamera};
@@ -49,6 +50,11 @@ pub struct EditorViewport {
 #[derive(Resource, Default)]
 pub struct ViewportHovered(pub bool);
 
+/// Request to frame (zoom/pan the editor camera to fit) the current selection, or the whole
+/// scene when nothing is selected. Handled by the viewport camera controller.
+#[derive(Event, Clone, Copy)]
+pub struct FrameSelectionRequest;
+
 /// Installs the viewport camera, grid, mode-switching, and picking.
 pub struct ViewportPlugin;
 
@@ -66,12 +72,14 @@ impl Plugin for ViewportPlugin {
                     picking::sync_selected_marker,
                     picking::clear_on_escape,
                     gizmos::draw_gizmos,
+                    outline::draw_selection_outline,
                 ),
             )
             .add_observer(picking::select_on_click)
             .add_observer(gizmos::begin_gizmo_drag)
             .add_observer(gizmos::gizmo_drag)
             .add_observer(gizmos::end_gizmo_drag)
+            .add_observer(outline::on_frame_selection)
             .add_observer(on_viewport_over)
             .add_observer(on_viewport_out);
     }

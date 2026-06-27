@@ -43,10 +43,12 @@ pub use remote::{
 pub use scripting::BehaviorScript;
 pub use spawning::*;
 pub use state::*;
+pub use ui::console::editor_console_layer;
 
 use bevy_app::{App, Plugin, PluginGroup, PluginGroupBuilder};
+use bevy_asset::embedded_asset;
 use bevy_dev_tools::infinite_grid::InfiniteGridPlugin;
-use bevy_feathers::{dark_theme::create_dark_theme, theme::UiTheme, FeathersPlugins};
+use bevy_feathers::{theme::UiTheme, FeathersPlugins};
 use bevy_state::app::AppExtStates;
 
 /// Convenient re-exports for editor users.
@@ -106,7 +108,9 @@ pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(UiTheme(create_dark_theme()))
+        embed_editor_icons(app);
+
+        app.insert_resource(UiTheme(ui::style::create_editor_theme()))
             .init_resource::<EditorSelection>()
             .init_resource::<GizmoMode>()
             .init_resource::<GizmoSpace>()
@@ -125,4 +129,77 @@ impl Plugin for EditorPlugin {
             app.add_plugins(bevy_ui_widgets::ScrollAreaPlugin);
         }
     }
+}
+
+/// Embed the editor's icon PNGs (`src/assets/icons/*.png`) into the asset registry. The
+/// paths must be string literals in this file so `include_bytes!` resolves relative to
+/// `src/`. Referenced via the `embedded://bevy_editor/...` constants in [`ui::icons`].
+fn embed_editor_icons(app: &mut App) {
+    macro_rules! embed {
+        ($app:expr, $($stem:literal),* $(,)?) => {{
+            $( embedded_asset!($app, concat!("assets/icons/", $stem, ".png")); )*
+        }};
+    }
+    embed!(
+        app,
+        "play",
+        "pause",
+        "stop",
+        "play-mode",
+        "gizmo-move",
+        "gizmo-rotate",
+        "gizmo-scale",
+        "cube",
+        "square",
+        "grid",
+        "snap",
+        "frame",
+        "eye",
+        "eye-off",
+        "lock",
+        "unlock",
+        "sphere",
+        "light",
+        "dir-light",
+        "camera",
+        "sprite",
+        "empty",
+        "chevron-down",
+        "chevron-right",
+        "float",
+        "dock",
+        "list",
+        "sliders",
+        "folder-tree",
+        "plus",
+        "x",
+        "close",
+        "duplicate",
+        "trash",
+        "search",
+        "undo",
+        "redo",
+        "save",
+        "folder",
+        "folder-open",
+        "file",
+        "file-plus",
+        "image",
+        "import",
+        "code",
+        "terminal",
+        "command",
+        "sun",
+        "moon",
+        "remote",
+        "info",
+        "warning",
+        "error",
+        "success",
+        "check",
+        "settings",
+        "build",
+        "export",
+        "menu",
+    );
 }
