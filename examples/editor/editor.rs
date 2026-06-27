@@ -5,15 +5,15 @@
 //! cargo run --example editor --features bevy_editor
 //! ```
 //!
-//! The editor opens a paneled window — a menu bar and toolbar across the top, an
-//! entity **Hierarchy** on the left, the rendered **Viewport** in the center, a
-//! reflection-driven **Inspector** on the right, and an **Asset** browser along the
-//! bottom. Use the *Entity* menu to spawn primitives, click them in the viewport to
-//! select, edit their components in the inspector, drag them to move, then *Save* the
-//! scene and *Play* to run it.
+//! The editor opens a paneled window — a menu bar, toolbar, and scene-tab strip across the
+//! top, an entity **Hierarchy** on the left, the rendered **Viewport** in the center, a
+//! reflection-driven **Inspector** on the right, and an **Asset** browser along the bottom.
+//! Use the *Entity* menu to spawn primitives, click them in the viewport or hierarchy to
+//! select, edit their components in the inspector, drag them to move (or use the Move /
+//! Rotate / Scale gizmo), then *Save* the scene and *Play* to run it. Cmd/Ctrl+Z undoes.
 
 use bevy::{
-    editor::{spawn_kind, EditorPlugins, EditorSelection, SpawnKind},
+    editor::{spawn_kind, BehaviorScript, EditorPlugins, EditorSelection, SpawnKind},
     picking::mesh_picking::MeshPickingPlugin,
     prelude::*,
     winit::{UpdateMode, WinitSettings},
@@ -63,6 +63,11 @@ fn spawn_demo_scene(
         Transform::from_xyz(-1.2, 0.5, 0.0),
         "Cube",
     );
+    // Attach a behavior script so the cube spins in play mode — edit it live in the
+    // inspector, or add scripts to other entities via the inspector's "Add Component".
+    commands.entity(cube).insert(BehaviorScript {
+        source: "spin 1.0".into(),
+    });
     spawn_kind(
         &mut commands,
         &mut meshes,

@@ -7,9 +7,13 @@ mod splitter;
 
 pub use splitter::{ResizeSide, Splitter};
 
-use bevy_app::{App, Plugin, Startup};
+use bevy_app::{App, Plugin, Startup, Update};
 use bevy_ecs::prelude::*;
+use bevy_input::keyboard::KeyCode;
+use bevy_input::ButtonInput;
+use bevy_picking::events::{Click, Pointer};
 use bevy_scene::prelude::SpawnListSystem;
+use bevy_text::EditableText;
 
 /// Marker on the central panel node that should host the rendered scene. The viewport
 /// plugin inserts a `ViewportNode` here once the offscreen camera exists.
@@ -28,16 +32,83 @@ pub struct InspectorContent;
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct AssetContent;
 
+/// Marker on the container that holds the scene-tab buttons.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct TabBarContent;
+
 /// Marker on the editor's UI camera (the window camera that renders the panels).
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct EditorUiCamera;
 
+/// Seeds a freshly-spawned text input with initial text. Feathers' `FeathersTextInput`
+/// builds an empty `EditableText`; place this alongside it (and pair with
+/// `bevy_input_focus::AutoFocus` to focus it) to start editing from an existing value.
+#[derive(Component, Clone, Default)]
+pub struct SeedText(pub String);
+
+/// One-shot: when a seeded text input's `EditableText` first appears, replace it with one
+/// containing the seed text, then drop the marker.
+fn seed_text_inputs(
+    mut q: Query<(Entity, &SeedText, &mut EditableText), Added<EditableText>>,
+    mut commands: Commands,
+) {
+    for (entity, seed, mut editable) in q.iter_mut() {
+        *editable = EditableText::new(&seed.0);
+        commands.entity(entity).remove::<SeedText>();
+    }
+}
+
+/// Read the current text of a text input entity, if it has one.
+pub fn read_text_input(editables: &Query<&EditableText>, entity: Entity) -> Option<String> {
+    editables.get(entity).ok().map(|e| e.value().to_string())
+}
+
+/// Marks a modal overlay (a full-screen backdrop hosting a floating dialog). Spawned by
+/// feature plugins (scene Save/Open, asset import); dismissed centrally via [`CloseOverlay`]
+/// or the Escape key.
+#[derive(Component, Default, Clone, Copy)]
+pub struct EditorOverlay;
+
+/// Request to close any open editor overlay.
+#[derive(Event, Clone, Copy)]
+pub struct CloseOverlay;
+
+/// Stop a click from bubbling to an overlay backdrop, so clicking inside a dialog panel
+/// doesn't dismiss it.
+pub fn stop_click(mut click: On<Pointer<Click>>) {
+    click.propagate(false);
+}
+
+fn on_close_overlay(
+    _: On<CloseOverlay>,
+    overlays: Query<Entity, With<EditorOverlay>>,
+    mut commands: Commands,
+) {
+    for overlay in overlays.iter() {
+        commands.entity(overlay).despawn();
+    }
+}
+
+fn close_overlay_on_escape(
+    keys: Res<ButtonInput<KeyCode>>,
+    overlays: Query<Entity, With<EditorOverlay>>,
+    mut commands: Commands,
+) {
+    if keys.just_pressed(KeyCode::Escape) {
+        for overlay in overlays.iter() {
+            commands.entity(overlay).despawn();
+        }
+    }
+}
+
 /// Installs the editor shell: spawns the paneled layout at startup and wires the
-/// splitter drag behavior.
+/// splitter drag behavior and shared overlay handling.
 pub struct EditorUiPlugin;
 
 impl Plugin for EditorUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, shell::editor_shell.spawn());
+        app.add_systems(Startup, shell::editor_shell.spawn())
+            .add_systems(Update, (seed_text_inputs, close_overlay_on_escape))
+            .add_observer(on_close_overlay);
     }
 }

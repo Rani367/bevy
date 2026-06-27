@@ -14,11 +14,19 @@
 //! Like the Feathers toolkit it is built on, this crate is experimental and
 //! unfinished. APIs will change in breaking ways.
 
+extern crate alloc;
+
 mod actions;
+mod build_export;
 mod markers;
 mod play;
+mod remote;
+mod scripting;
+mod snapshot;
 mod spawning;
 mod state;
+mod tabs;
+mod undo;
 
 pub mod hierarchy;
 pub mod inspector;
@@ -28,6 +36,7 @@ pub mod viewport;
 
 pub use actions::*;
 pub use markers::*;
+pub use scripting::BehaviorScript;
 pub use spawning::*;
 pub use state::*;
 
@@ -41,8 +50,10 @@ pub mod prelude {
     pub use crate::{
         markers::{EditorEntity, GameCamera, SceneEntity},
         state::{
-            EditorSelected, EditorSelection, EditorState, GizmoMode, GizmoSpace, ViewportMode,
+            EditorSelected, EditorSelection, EditorState, GizmoDrag, GizmoMode, GizmoSpace,
+            ViewportMode,
         },
+        undo::{RequestRedo, RequestUndo, UndoStack},
         EditorPlugin, EditorPlugins,
     };
 }
@@ -72,6 +83,16 @@ impl PluginGroup for EditorPlugins {
             .add(scene_io::ScenePlugin)
             // Play / pause / stop with snapshot + restore.
             .add(play::PlayPlugin)
+            // Undo / redo via scene snapshots.
+            .add(undo::UndoPlugin)
+            // Minimal behavior-script interpreter (play mode).
+            .add(scripting::ScriptingPlugin)
+            // Build / export (cargo build, scene export).
+            .add(build_export::BuildExportPlugin)
+            // Multi-scene tabs.
+            .add(tabs::TabsPlugin)
+            // Remote (BRP) read-only inspection scaffold.
+            .add(remote::RemotePlugin)
     }
 }
 
@@ -85,11 +106,18 @@ impl Plugin for EditorPlugin {
             .init_resource::<EditorSelection>()
             .init_resource::<GizmoMode>()
             .init_resource::<GizmoSpace>()
+            .init_resource::<GizmoDrag>()
             .init_resource::<ViewportMode>()
             .init_state::<EditorState>();
 
         app.register_type::<SceneEntity>();
         app.register_type::<SpawnKind>();
         app.register_type::<SpawnedAs>();
+
+        // Feathers doesn't pull in `ScrollAreaPlugin`, but the editor panels rely on it
+        // for wheel-scrolling long hierarchies / inspectors. Add it once.
+        if !app.is_plugin_added::<bevy_ui_widgets::ScrollAreaPlugin>() {
+            app.add_plugins(bevy_ui_widgets::ScrollAreaPlugin);
+        }
     }
 }

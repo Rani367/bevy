@@ -44,6 +44,7 @@ pub fn orbit_camera(
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
+    hovered: Res<super::ViewportHovered>,
     mut q: Query<(&mut Transform, &mut Editor3dCamera)>,
 ) {
     let Ok((mut transform, mut cam)) = q.single_mut() else {
@@ -65,7 +66,9 @@ pub fn orbit_camera(
         cam.focus += (-right * delta.x + up * delta.y) * pan_scale;
     }
 
-    if scroll.delta.y != 0.0 {
+    // Only zoom when the pointer is over the viewport, so wheel-scrolling a side panel
+    // doesn't also dolly the camera.
+    if hovered.0 && scroll.delta.y != 0.0 {
         cam.radius = (cam.radius * (1.0 - scroll.delta.y * ZOOM_SENSITIVITY)).clamp(0.5, 500.0);
     }
 
@@ -93,6 +96,7 @@ pub fn pan_camera(
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
+    hovered: Res<super::ViewportHovered>,
     mut q: Query<(&mut Transform, &mut Editor2dCamera)>,
 ) {
     let Ok((mut transform, mut cam)) = q.single_mut() else {
@@ -108,7 +112,8 @@ pub fn pan_camera(
         transform.translation.y += delta.y * cam.zoom;
     }
 
-    if scroll.delta.y != 0.0 {
+    // Only zoom when the pointer is over the viewport (see `orbit_camera`).
+    if hovered.0 && scroll.delta.y != 0.0 {
         cam.zoom = (cam.zoom * (1.0 - scroll.delta.y * ZOOM_SENSITIVITY)).clamp(0.05, 50.0);
     }
 

@@ -19,6 +19,7 @@ use bevy_ecs::prelude::*;
 use bevy_image::Image;
 use bevy_light::DirectionalLight;
 use bevy_math::Vec3;
+use bevy_picking::events::{Out, Over, Pointer};
 use bevy_render::render_resource::TextureFormat;
 use bevy_transform::components::Transform;
 use bevy_ui::widget::ViewportNode;
@@ -43,12 +44,18 @@ pub struct EditorViewport {
     pub current_mode: ViewportMode,
 }
 
+/// True while the pointer is over the viewport panel. Used to gate the camera's
+/// wheel-zoom so scrolling a side panel doesn't also zoom the scene camera.
+#[derive(Resource, Default)]
+pub struct ViewportHovered(pub bool);
+
 /// Installs the viewport camera, grid, mode-switching, and picking.
 pub struct ViewportPlugin;
 
 impl Plugin for ViewportPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_viewport)
+        app.init_resource::<ViewportHovered>()
+            .add_systems(Startup, setup_viewport)
             .add_systems(
                 Update,
                 (
@@ -62,8 +69,33 @@ impl Plugin for ViewportPlugin {
                 ),
             )
             .add_observer(picking::select_on_click)
-            .add_observer(gizmos::select_on_drag_start)
-            .add_observer(gizmos::drag_to_translate);
+            .add_observer(gizmos::begin_gizmo_drag)
+            .add_observer(gizmos::gizmo_drag)
+            .add_observer(gizmos::end_gizmo_drag)
+            .add_observer(on_viewport_over)
+            .add_observer(on_viewport_out);
+    }
+}
+
+/// Mark the viewport hovered when the pointer enters the viewport panel node.
+fn on_viewport_over(
+    over: On<Pointer<Over>>,
+    slots: Query<(), With<ViewportSlot>>,
+    mut hovered: ResMut<ViewportHovered>,
+) {
+    if slots.contains(over.entity) {
+        hovered.0 = true;
+    }
+}
+
+/// Clear the viewport-hovered flag when the pointer leaves the viewport panel node.
+fn on_viewport_out(
+    out: On<Pointer<Out>>,
+    slots: Query<(), With<ViewportSlot>>,
+    mut hovered: ResMut<ViewportHovered>,
+) {
+    if slots.contains(out.entity) {
+        hovered.0 = false;
     }
 }
 

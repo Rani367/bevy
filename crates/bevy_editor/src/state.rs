@@ -3,6 +3,7 @@
 //! and writes; they are intentionally kept tiny and dependency-free.
 
 use bevy_ecs::prelude::*;
+use bevy_math::Vec3;
 use bevy_state::state::States;
 
 /// Whether the editor is currently editing the scene, running it (play mode), or
@@ -85,6 +86,20 @@ pub enum GizmoMode {
     Rotate,
     /// Drag to scale (Phase 2).
     Scale,
+}
+
+/// Per-drag gizmo state. The world-space axis chosen at drag start constrains the
+/// translate/scale gesture to a single axis; `None` means free-plane translate. `active`
+/// gates the per-gesture undo snapshot (taken once on drag start).
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct GizmoDrag {
+    /// World-space axis the current drag is constrained to, if any.
+    pub axis: Option<Vec3>,
+    /// Whether a gizmo drag gesture is currently in progress.
+    pub active: bool,
+    /// Whether the axis constraint has been decided for the current gesture (decided on
+    /// the first drag frame from the initial drag direction).
+    pub chosen: bool,
 }
 
 /// Whether the gizmo operates in world or local space.

@@ -36,6 +36,25 @@ pub struct SpawnRequest(pub SpawnKind);
 #[derive(Event, Clone, Copy)]
 pub struct DeleteSelectedRequest;
 
+/// Request to duplicate the current selection. Handled by the hierarchy plugin.
+#[derive(Event, Clone, Copy)]
+pub struct DuplicateRequest;
+
+/// Request to reparent a scene entity. `new_parent` of `None` moves it to the scene root.
+/// Handled by the hierarchy plugin.
+#[derive(Event, Clone, Copy)]
+pub struct ReparentRequest {
+    /// The entity being moved.
+    pub child: Entity,
+    /// The new parent, or `None` to unparent to the scene root.
+    pub new_parent: Option<Entity>,
+}
+
+/// Request to begin renaming a scene entity inline in the hierarchy. Handled by the
+/// hierarchy plugin.
+#[derive(Event, Clone, Copy)]
+pub struct RenameRequest(pub Entity);
+
 /// Scene-file operations, handled by the scene-IO plugin. Paths are relative to the
 /// asset root's `scenes/` directory.
 #[derive(Event, Clone, Debug)]
@@ -48,4 +67,19 @@ pub enum SceneIoRequest {
     SaveAs(String),
     /// Load a scene file, replacing the current scene.
     Open(String),
+    /// Instantiate a scene file's entities *into* the current scene (prefab drop), without
+    /// clearing what's already there.
+    Instantiate(String),
 }
+
+/// Open the "Import Asset" dialog (a source-path prompt). Handled by the scene-IO plugin.
+#[derive(Event, Clone, Copy)]
+pub struct OpenImportDialog;
+
+/// Open the "Save Scene As" dialog (a name prompt). Handled by the scene-IO plugin.
+#[derive(Event, Clone, Copy)]
+pub struct OpenSaveDialog;
+
+/// Open the "Open Scene" dialog (a list of saved scenes). Handled by the scene-IO plugin.
+#[derive(Event, Clone, Copy)]
+pub struct OpenOpenDialog;

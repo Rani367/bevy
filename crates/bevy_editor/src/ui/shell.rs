@@ -14,27 +14,30 @@ use bevy_feathers::{
     theme::{ThemeBackgroundColor, ThemedText},
     tokens,
 };
-use bevy_log::info;
 use bevy_scene::prelude::*;
 use bevy_state::state::NextState;
 use bevy_ui::widget::Text;
 use bevy_ui::{
     percent, px, AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, IsDefaultUiCamera, Node,
-    UiRect,
+    Overflow, UiRect,
 };
-use bevy_ui_widgets::Activate;
+use bevy_ui_widgets::{Activate, ScrollArea};
 use bevy_window::SystemCursorIcon;
 
-use crate::actions::{DeleteSelectedRequest, SceneIoRequest, SpawnKind, SpawnRequest};
+use crate::actions::{
+    DeleteSelectedRequest, OpenImportDialog, OpenOpenDialog, OpenSaveDialog, SceneIoRequest,
+    SpawnKind, SpawnRequest,
+};
+use crate::build_export::{BuildProjectRequest, ExportSceneRequest};
 use crate::markers::EditorEntity;
+use crate::remote::OpenConnectDialog;
 use crate::state::{EditorState, GizmoMode, ViewportMode};
+use crate::undo::{RequestRedo, RequestUndo};
 
 use super::splitter::{on_splitter_drag, ResizeSide, Splitter};
-use super::{AssetContent, EditorUiCamera, HierarchyContent, InspectorContent, ViewportSlot};
-
-/// Default scene file used by the bare *Save* / *Open* menu actions (a real file
-/// picker is a later phase).
-const DEFAULT_SCENE_FILE: &str = "scene.ron";
+use super::{
+    AssetContent, EditorUiCamera, HierarchyContent, InspectorContent, TabBarContent, ViewportSlot,
+};
 
 /// The full editor shell: the UI camera plus the root layout. Spawned once at startup.
 pub fn editor_shell() -> impl SceneList {
@@ -57,6 +60,7 @@ fn editor_root() -> impl Scene {
         Children [
             menu_bar(),
             toolbar(),
+            tab_bar(),
             body_row(),
             asset_row(),
         ]
@@ -83,6 +87,7 @@ fn menu_bar() -> impl Scene {
             edit_menu(),
             entity_menu(),
             view_menu(),
+            build_menu(),
         ]
     }
 }
@@ -99,15 +104,15 @@ fn file_menu() -> impl Scene {
                 (@FeathersMenuItem { @caption: bsn! { Text("New") ThemedText } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(SceneIoRequest::New); })),
                 (@FeathersMenuItem { @caption: bsn! { Text("Open Scene") ThemedText } }
-                    on(|_: On<Activate>, mut c: Commands| {
-                        c.trigger(SceneIoRequest::Open(DEFAULT_SCENE_FILE.into()));
-                    })),
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenOpenDialog); })),
                 (@FeathersMenuItem { @caption: bsn! { Text("Save") ThemedText } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(SceneIoRequest::Save); })),
                 (@FeathersMenuItem { @caption: bsn! { Text("Save As") ThemedText } }
-                    on(|_: On<Activate>, mut c: Commands| {
-                        c.trigger(SceneIoRequest::SaveAs(DEFAULT_SCENE_FILE.into()));
-                    })),
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenSaveDialog); })),
+                (@FeathersMenuItem { @caption: bsn! { Text("Import Asset") ThemedText } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenImportDialog); })),
+                (@FeathersMenuItem { @caption: bsn! { Text("Connect to Remote") ThemedText } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenConnectDialog); })),
                 @FeathersMenuDivider,
                 (@FeathersMenuItem { @caption: bsn! { Text("Quit") ThemedText } }
                     on(|_: On<Activate>, mut exit: MessageWriter<AppExit>| {
@@ -128,9 +133,9 @@ fn edit_menu() -> impl Scene {
             }),
             (@FeathersMenuPopup Children [
                 (@FeathersMenuItem { @caption: bsn! { Text("Undo") ThemedText } }
-                    on(|_: On<Activate>| { info!("Undo is not yet implemented"); })),
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(RequestUndo); })),
                 (@FeathersMenuItem { @caption: bsn! { Text("Redo") ThemedText } }
-                    on(|_: On<Activate>| { info!("Redo is not yet implemented"); })),
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(RequestRedo); })),
             ]),
         ]
     }
@@ -184,6 +189,24 @@ fn view_menu() -> impl Scene {
     }
 }
 
+fn build_menu() -> impl Scene {
+    bsn! {
+        @FeathersMenu
+        Children [
+            (@FeathersMenuButton {
+                @caption: bsn! { Text("Build") ThemedText },
+                @arrow: false,
+            }),
+            (@FeathersMenuPopup Children [
+                (@FeathersMenuItem { @caption: bsn! { Text("Export Scene") ThemedText } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(ExportSceneRequest); })),
+                (@FeathersMenuItem { @caption: bsn! { Text("Build Project") ThemedText } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(BuildProjectRequest); })),
+            ]),
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Toolbar
 // ---------------------------------------------------------------------------
@@ -224,6 +247,25 @@ fn toolbar() -> impl Scene {
 }
 
 // ---------------------------------------------------------------------------
+// Tab bar (multi-scene tabs)
+// ---------------------------------------------------------------------------
+
+fn tab_bar() -> impl Scene {
+    bsn! {
+        Node {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: px(2),
+            padding: px(3),
+            min_height: px(26),
+        }
+        ThemeBackgroundColor(tokens::WINDOW_BG)
+        TabBarContent
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Body row: Hierarchy | Viewport | Inspector
 // ---------------------------------------------------------------------------
 
@@ -259,12 +301,15 @@ fn hierarchy_panel() -> impl Scene {
             (
                 Node {
                     flex_grow: 1.0,
+                    min_height: px(0),
                     display: Display::Flex,
                     flex_direction: FlexDirection::Column,
                     padding: px(4),
                     row_gap: px(2),
+                    overflow: Overflow::scroll_y(),
                 }
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)
+                ScrollArea
                 HierarchyContent
             ),
         ]
@@ -306,12 +351,15 @@ fn inspector_panel() -> impl Scene {
             (
                 Node {
                     flex_grow: 1.0,
+                    min_height: px(0),
                     display: Display::Flex,
                     flex_direction: FlexDirection::Column,
                     padding: px(6),
                     row_gap: px(4),
+                    overflow: Overflow::scroll_y(),
                 }
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)
+                ScrollArea
                 InspectorContent
             ),
         ]
@@ -330,6 +378,7 @@ fn asset_row() -> impl Scene {
             (
                 Node {
                     flex_grow: 1.0,
+                    min_height: px(0),
                     display: Display::Flex,
                     flex_direction: FlexDirection::Row,
                     flex_wrap: FlexWrap::Wrap,
@@ -337,8 +386,10 @@ fn asset_row() -> impl Scene {
                     column_gap: px(6),
                     row_gap: px(6),
                     align_items: AlignItems::Start,
+                    overflow: Overflow::scroll_y(),
                 }
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)
+                ScrollArea
                 AssetContent
             ),
         ]
