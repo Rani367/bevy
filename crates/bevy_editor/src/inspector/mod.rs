@@ -25,7 +25,10 @@ use bevy_input_focus::InputFocus;
 use bevy_picking::events::{Click, Pointer};
 use bevy_reflect::enums::{DynamicEnum, DynamicVariant, VariantInfo};
 use bevy_reflect::std_traits::ReflectDefault;
-use bevy_reflect::{GetPath, PartialReflect, Reflect, ReflectRef, TypeInfo};
+use bevy_reflect::tuple::DynamicTuple;
+use bevy_reflect::{
+    GetPath, PartialReflect, Reflect, ReflectMut, ReflectRef, TypeInfo, TypeRegistry,
+};
 use bevy_scene::prelude::*;
 use bevy_scene::EntityScene;
 use bevy_text::EditableText;
@@ -37,13 +40,14 @@ use bevy_ui::{
 use bevy_ui_widgets::{Activate, ScrollArea, ValueChange};
 
 use crate::markers::EditorEntity;
+use crate::scripting::{BehaviorScript, OpenScriptEditor};
 use crate::state::EditorSelection;
 use crate::ui::{InspectorContent, SeedText};
 use crate::undo::push_undo;
 
 /// A numeric field's concrete type, so edits can be written back to the right Rust type.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum NumTy {
+pub(crate) enum NumTy {
     F32,
     F64,
     I32,
@@ -68,7 +72,7 @@ impl NumTy {
 
 /// Which editable kind a [`FieldBinding`] represents.
 #[derive(Clone, PartialEq, Debug, Default)]
-enum FieldKind {
+pub(crate) enum FieldKind {
     Num(NumTy),
     Bool,
     Str,
@@ -77,16 +81,44 @@ enum FieldKind {
     ReadOnly,
 }
 
+/// How a scalar edit is routed back into the world. Plain struct/list fields are addressed
+/// by reflect path (`Scalar`); `Option` payloads and `Map` values can't be path-addressed,
+/// so they navigate to the container and patch its element. Structural ops (add/remove/
+/// toggle) drive collection-editing buttons.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub(crate) enum FieldOp {
+    /// The widget's `path` addresses the value directly (the common case, incl. list elements
+    /// via `[i]` indexing).
+    #[default]
+    Scalar,
+    /// `path` addresses an `Option`; patch its `Some(_)` payload.
+    OptionInner,
+    /// `path` addresses a `Map`; patch the value of its `index`-th entry.
+    MapValue(usize),
+    /// Button: append a default element to the list at `path`.
+    ListAdd,
+    /// Button: remove the last element of the list at `path`.
+    ListRemove,
+    /// Button: toggle the `Option` at `path` between `Some(default)` and `None`.
+    OptionToggle,
+    /// Button: insert a default entry into the map at `path`.
+    MapAdd,
+    /// Button: remove the `index`-th entry from the map at `path`.
+    MapRemove(usize),
+}
+
 /// Placed on an editable field widget; records how to write the widget's value back into
 /// the world via reflection.
 #[derive(Component, Clone, Debug)]
 pub struct FieldBinding {
-    target: Entity,
-    component: TypeId,
-    path: String,
-    kind: FieldKind,
+    pub(crate) target: Entity,
+    pub(crate) component: TypeId,
+    pub(crate) path: String,
+    pub(crate) kind: FieldKind,
     /// For [`FieldKind::Enum`]: the ordered list of variant names to cycle through.
-    variants: Vec<String>,
+    pub(crate) variants: Vec<String>,
+    /// How the edit is routed back (path vs. container element vs. structural button).
+    pub(crate) op: FieldOp,
 }
 
 impl Default for FieldBinding {
@@ -97,6 +129,7 @@ impl Default for FieldBinding {
             path: String::new(),
             kind: FieldKind::ReadOnly,
             variants: Vec::new(),
+            op: FieldOp::Scalar,
         }
     }
 }
@@ -108,6 +141,16 @@ struct AddComponentButton(TypeId);
 impl Default for AddComponentButton {
     fn default() -> Self {
         Self(TypeId::of::<()>())
+    }
+}
+
+/// An "Edit Script" button shown on a [`BehaviorScript`] section; opens the script editor.
+#[derive(Component, Clone, Copy)]
+struct ScriptEditButton(Entity);
+
+impl Default for ScriptEditButton {
+    fn default() -> Self {
+        Self(Entity::PLACEHOLDER)
     }
 }
 
@@ -176,9 +219,11 @@ impl Plugin for InspectorPlugin {
             .add_observer(on_i64_changed)
             .add_observer(on_bool_changed)
             .add_observer(on_enum_cycle)
+            .add_observer(on_field_op)
             .add_observer(on_open_add_component)
             .add_observer(on_add_component_button)
             .add_observer(on_remove_component_button)
+            .add_observer(on_script_edit_button)
             .add_observer(on_close_inspector_overlay);
     }
 }
@@ -191,6 +236,26 @@ struct FieldModel {
     label: String,
     path: String,
     value: FieldValue,
+    op: FieldOp,
+}
+
+impl FieldModel {
+    /// A plain path-addressed leaf field.
+    fn leaf(label: impl Into<String>, path: impl Into<String>, value: FieldValue) -> Self {
+        Self {
+            label: label.into(),
+            path: path.into(),
+            value,
+            op: FieldOp::Scalar,
+        }
+    }
+}
+
+/// Whether a collection header is a list (`[i]` add/remove) or a map (key/value add/remove).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CollKind {
+    List,
+    Map,
 }
 
 enum FieldValue {
@@ -203,6 +268,15 @@ enum FieldValue {
     Enum {
         current: String,
         variants: Vec<String>,
+    },
+    /// A list/map header with element count and add/remove controls.
+    Collection {
+        kind: CollKind,
+        len: usize,
+    },
+    /// An `Option`'s `Some`/`None` toggle button.
+    OptionToggle {
+        is_some: bool,
     },
     ReadOnly(String),
 }
@@ -259,6 +333,10 @@ fn rebuild_inspector(world: &mut World) {
             for field in &comp.fields {
                 scenes.push(field_widget(field, target, comp.type_id));
             }
+            // A `BehaviorScript` gets an "Edit Script" button opening the multi-line editor.
+            if comp.type_id == TypeId::of::<BehaviorScript>() {
+                scenes.push(Box::new(EntityScene(script_edit_button(target))));
+            }
         }
     } else {
         scenes.push(Box::new(EntityScene(empty_hint())));
@@ -279,6 +357,7 @@ fn field_widget(field: &FieldModel, target: Entity, component: TypeId) -> Box<dy
             field.path.clone(),
             *ty,
             *value,
+            field.op.clone(),
         ))),
         FieldValue::Bool(v) => Box::new(EntityScene(bool_field(
             field.label.clone(),
@@ -286,6 +365,7 @@ fn field_widget(field: &FieldModel, target: Entity, component: TypeId) -> Box<dy
             component,
             field.path.clone(),
             *v,
+            field.op.clone(),
         ))),
         FieldValue::Str(text) => Box::new(EntityScene(string_field(
             field.label.clone(),
@@ -293,6 +373,7 @@ fn field_widget(field: &FieldModel, target: Entity, component: TypeId) -> Box<dy
             component,
             field.path.clone(),
             text.clone(),
+            field.op.clone(),
         ))),
         FieldValue::Enum { current, variants } => Box::new(EntityScene(enum_field(
             field.label.clone(),
@@ -301,6 +382,21 @@ fn field_widget(field: &FieldModel, target: Entity, component: TypeId) -> Box<dy
             field.path.clone(),
             current.clone(),
             variants.clone(),
+        ))),
+        FieldValue::Collection { kind, len } => Box::new(EntityScene(collection_header(
+            field.label.clone(),
+            target,
+            component,
+            field.path.clone(),
+            *kind,
+            *len,
+        ))),
+        FieldValue::OptionToggle { is_some } => Box::new(EntityScene(option_toggle_field(
+            field.label.clone(),
+            target,
+            component,
+            field.path.clone(),
+            *is_some,
         ))),
         FieldValue::ReadOnly(text) => Box::new(EntityScene(readonly_field(
             field.label.clone(),
@@ -364,35 +460,23 @@ fn collect_component_fields(value: &dyn PartialReflect, out: &mut Vec<FieldModel
         }
         // A component that *is* an enum (e.g. `Visibility`): one field at the empty path.
         ReflectRef::Enum(_) => push_field(value, "", "value", 0, out),
-        _ => out.push(FieldModel {
-            label: "value".into(),
-            path: String::new(),
-            value: FieldValue::ReadOnly(format!("{value:?}")),
-        }),
+        _ => out.push(FieldModel::leaf(
+            "value",
+            "",
+            FieldValue::ReadOnly(format!("{value:?}")),
+        )),
     }
 }
 
-/// Push a single field, recursing into nested structs and mapping known leaf types to
-/// editable widgets.
-fn push_field(
-    field: &dyn PartialReflect,
-    path: &str,
-    label: &str,
-    depth: usize,
-    out: &mut Vec<FieldModel>,
-) {
+/// If `field` is a known scalar leaf type, return the [`FieldValue`] for an editable widget.
+fn scalar_value(field: &dyn PartialReflect) -> Option<FieldValue> {
     macro_rules! num {
         ($ty:ty, $tag:expr) => {
             if let Some(v) = field.try_downcast_ref::<$ty>() {
-                out.push(FieldModel {
-                    label: label.into(),
-                    path: path.into(),
-                    value: FieldValue::Num {
-                        value: *v as f64,
-                        ty: $tag,
-                    },
+                return Some(FieldValue::Num {
+                    value: *v as f64,
+                    ty: $tag,
                 });
-                return;
             }
         };
     }
@@ -403,23 +487,37 @@ fn push_field(
     num!(u32, NumTy::U32);
     num!(u64, NumTy::U64);
     num!(usize, NumTy::Usize);
-
     if let Some(v) = field.try_downcast_ref::<bool>() {
-        out.push(FieldModel {
-            label: label.into(),
-            path: path.into(),
-            value: FieldValue::Bool(*v),
-        });
-        return;
+        return Some(FieldValue::Bool(*v));
     }
     if let Some(v) = field.try_downcast_ref::<String>() {
-        out.push(FieldModel {
-            label: label.into(),
-            path: path.into(),
-            value: FieldValue::Str(v.clone()),
-        });
+        return Some(FieldValue::Str(v.clone()));
+    }
+    None
+}
+
+/// Whether `field` is a `core::option::Option<_>`.
+fn is_option(field: &dyn PartialReflect) -> bool {
+    field
+        .get_represented_type_info()
+        .map(|info| info.type_path().starts_with("core::option::Option<"))
+        .unwrap_or(false)
+}
+
+/// Push a single field, recursing into nested structs / collections and mapping known leaf
+/// types to editable widgets.
+fn push_field(
+    field: &dyn PartialReflect,
+    path: &str,
+    label: &str,
+    depth: usize,
+    out: &mut Vec<FieldModel>,
+) {
+    if let Some(value) = scalar_value(field) {
+        out.push(FieldModel::leaf(label, path, value));
         return;
     }
+
     // Color: editable R/G/B/A channels, each writing the whole color at this path.
     if let Some(c) = field.try_downcast_ref::<Color>() {
         let s = c.to_srgba();
@@ -429,14 +527,43 @@ fn push_field(
             ("b", NumTy::ColorB, s.blue),
             ("a", NumTy::ColorA, s.alpha),
         ] {
-            out.push(FieldModel {
-                label: format!("{label}.{suffix}"),
-                path: path.into(),
-                value: FieldValue::Num {
+            out.push(FieldModel::leaf(
+                format!("{label}.{suffix}"),
+                path,
+                FieldValue::Num {
                     value: val as f64,
                     ty: chan,
                 },
-            });
+            ));
+        }
+        return;
+    }
+
+    // `Option<T>`: a Some/None toggle, plus an editor for the payload when present.
+    if is_option(field)
+        && let ReflectRef::Enum(e) = field.reflect_ref()
+    {
+        let is_some = e.variant_name() == "Some";
+        out.push(FieldModel::leaf(
+            label,
+            path,
+            FieldValue::OptionToggle { is_some },
+        ));
+        if is_some && let Some(inner) = e.field_at(0) {
+            if let Some(value) = scalar_value(inner) {
+                out.push(FieldModel {
+                    label: format!("{label} = Some"),
+                    path: path.into(),
+                    value,
+                    op: FieldOp::OptionInner,
+                });
+            } else {
+                out.push(FieldModel::leaf(
+                    format!("{label} = Some"),
+                    path,
+                    FieldValue::ReadOnly(format!("{inner:?}")),
+                ));
+            }
         }
         return;
     }
@@ -446,10 +573,10 @@ fn push_field(
         && let Some(TypeInfo::Enum(info)) = field.get_represented_type_info()
         && info.iter().all(|v| matches!(v, VariantInfo::Unit(_)))
     {
-        out.push(FieldModel {
-            label: label.into(),
-            path: path.into(),
-            value: FieldValue::Enum {
+        out.push(FieldModel::leaf(
+            label,
+            path,
+            FieldValue::Enum {
                 current: e.variant_name().to_string(),
                 variants: info
                     .variant_names()
@@ -457,7 +584,84 @@ fn push_field(
                     .map(ToString::to_string)
                     .collect(),
             },
-        });
+        ));
+        return;
+    }
+
+    // List / array: a header with element count (+ add/remove for lists) and editable
+    // elements addressed by `[i]` indexing.
+    if let ReflectRef::List(list) = field.reflect_ref() {
+        out.push(FieldModel::leaf(
+            label,
+            path,
+            FieldValue::Collection {
+                kind: CollKind::List,
+                len: list.len(),
+            },
+        ));
+        for i in 0..list.len() {
+            if let Some(elem) = list.get(i) {
+                push_field(
+                    elem,
+                    &format!("{path}[{i}]"),
+                    &format!("[{i}]"),
+                    depth + 1,
+                    out,
+                );
+            }
+        }
+        return;
+    }
+    if let ReflectRef::Array(arr) = field.reflect_ref() {
+        out.push(FieldModel::leaf(
+            label,
+            path,
+            FieldValue::Collection {
+                kind: CollKind::List,
+                len: arr.len(),
+            },
+        ));
+        for i in 0..arr.len() {
+            if let Some(elem) = arr.get(i) {
+                push_field(
+                    elem,
+                    &format!("{path}[{i}]"),
+                    &format!("[{i}]"),
+                    depth + 1,
+                    out,
+                );
+            }
+        }
+        return;
+    }
+
+    // Map: a header (+ add/remove) and editable scalar values keyed by their iteration index.
+    if let ReflectRef::Map(map) = field.reflect_ref() {
+        out.push(FieldModel::leaf(
+            label,
+            path,
+            FieldValue::Collection {
+                kind: CollKind::Map,
+                len: map.len(),
+            },
+        ));
+        for (i, (key, value)) in map.iter().enumerate() {
+            let key_label = format!("{label}[{key:?}]");
+            if let Some(scalar) = scalar_value(value) {
+                out.push(FieldModel {
+                    label: key_label,
+                    path: path.into(),
+                    value: scalar,
+                    op: FieldOp::MapValue(i),
+                });
+            } else {
+                out.push(FieldModel::leaf(
+                    key_label,
+                    path,
+                    FieldValue::ReadOnly(format!("{value:?}")),
+                ));
+            }
+        }
         return;
     }
 
@@ -478,11 +682,11 @@ fn push_field(
         return;
     }
 
-    out.push(FieldModel {
-        label: label.into(),
-        path: path.into(),
-        value: FieldValue::ReadOnly(format!("{field:?}")),
-    });
+    out.push(FieldModel::leaf(
+        label,
+        path,
+        FieldValue::ReadOnly(format!("{field:?}")),
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +753,7 @@ fn number_field(
     path: String,
     ty: NumTy,
     value: f64,
+    op: FieldOp,
 ) -> impl Scene {
     let niv = match ty {
         NumTy::F64 => NumberInputValue::F64(value),
@@ -565,7 +770,7 @@ fn number_field(
                 @FeathersNumberInput
                 template_value(niv)
                 NumberInputPrecision(precision)
-                FieldBinding { target: target, component: component, path: path, kind: FieldKind::Num(ty), variants: Vec::new() }
+                FieldBinding { target: target, component: component, path: path, kind: FieldKind::Num(ty), variants: Vec::new(), op: op }
                 Node { flex_grow: 1.0, max_width: px(150) }
             )
         },
@@ -578,13 +783,14 @@ fn bool_field(
     component: TypeId,
     path: String,
     value: bool,
+    op: FieldOp,
 ) -> impl Scene {
     field_row(
         field_label,
         bsn! {
             (
                 @FeathersCheckbox
-                FieldBinding { target: target, component: component, path: path, kind: FieldKind::Bool, variants: Vec::new() }
+                FieldBinding { target: target, component: component, path: path, kind: FieldKind::Bool, variants: Vec::new(), op: op }
                 InitChecked(value)
             )
         },
@@ -597,6 +803,7 @@ fn string_field(
     component: TypeId,
     path: String,
     value: String,
+    op: FieldOp,
 ) -> impl Scene {
     field_row(
         field_label,
@@ -605,7 +812,7 @@ fn string_field(
                 Children [
                     (@FeathersTextInput
                         SeedText(value)
-                        FieldBinding { target: target, component: component, path: path, kind: FieldKind::Str, variants: Vec::new() })
+                        FieldBinding { target: target, component: component, path: path, kind: FieldKind::Str, variants: Vec::new(), op: op })
                 ])
         },
     )
@@ -623,13 +830,88 @@ fn enum_field(
         field_label,
         bsn! {
             (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text(current) ThemedText } }
-                FieldBinding { target: target, component: component, path: path, kind: FieldKind::Enum, variants: variants })
+                FieldBinding { target: target, component: component, path: path, kind: FieldKind::Enum, variants: variants, op: FieldOp::Scalar })
         },
     )
 }
 
 fn readonly_field(field_label: String, text: String) -> impl Scene {
     field_row(field_label, bsn! { label_dim(text) })
+}
+
+/// A list/map header row: `name [len]` plus `＋` / `−` buttons that add and remove elements.
+fn collection_header(
+    field_label: String,
+    target: Entity,
+    component: TypeId,
+    path: String,
+    kind: CollKind,
+    len: usize,
+) -> impl Scene {
+    let (add_op, remove_op) = match kind {
+        CollKind::List => (FieldOp::ListAdd, FieldOp::ListRemove),
+        CollKind::Map => (FieldOp::MapAdd, FieldOp::MapRemove(len.saturating_sub(1))),
+    };
+    let add_path = path.clone();
+    bsn! {
+        Node {
+            min_height: px(22),
+            padding: UiRect::axes(px(6), px(2)),
+            align_items: AlignItems::Center,
+            column_gap: px(6),
+        }
+        ThemeBackgroundColor(tokens::GROUP_HEADER_BG)
+        Children [
+            (Node { flex_grow: 1.0 } Children [ label_small(format!("{field_label} [{len}]")) ]),
+            (@FeathersButton { @variant: ButtonVariant::Plain, @caption: bsn! { Text("+") ThemedText } }
+                FieldBinding { target: target, component: component, path: add_path, kind: FieldKind::ReadOnly, variants: Vec::new(), op: add_op }),
+            (@FeathersButton { @variant: ButtonVariant::Plain, @caption: bsn! { Text("-") ThemedText } }
+                FieldBinding { target: target, component: component, path: path, kind: FieldKind::ReadOnly, variants: Vec::new(), op: remove_op }),
+        ]
+    }
+}
+
+/// An `Option` Some/None toggle button.
+fn option_toggle_field(
+    field_label: String,
+    target: Entity,
+    component: TypeId,
+    path: String,
+    is_some: bool,
+) -> impl Scene {
+    let caption = if is_some {
+        "Some (clear)"
+    } else {
+        "None (set)"
+    };
+    field_row(
+        field_label,
+        bsn! {
+            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text(caption) ThemedText } }
+                FieldBinding { target: target, component: component, path: path, kind: FieldKind::ReadOnly, variants: Vec::new(), op: FieldOp::OptionToggle })
+        },
+    )
+}
+
+/// The "Edit Script ⛶" button for a `BehaviorScript` section.
+fn script_edit_button(target: Entity) -> impl Scene {
+    bsn! {
+        Node { padding: UiRect::axes(px(6), px(3)) }
+        Children [
+            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Edit Script \u{29C9}") ThemedText } }
+                ScriptEditButton(target)),
+        ]
+    }
+}
+
+fn on_script_edit_button(
+    act: On<Activate>,
+    buttons: Query<&ScriptEditButton>,
+    mut commands: Commands,
+) {
+    if let Ok(button) = buttons.get(act.entity) {
+        commands.trigger(OpenScriptEditor(button.0));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -699,10 +981,36 @@ fn on_i64_changed(
 }
 
 fn queue_numeric(commands: &mut Commands, binding: &FieldBinding, ty: NumTy, value: f64) {
-    let (target, component, path) = (binding.target, binding.component, binding.path.clone());
+    let (target, component, path, op) = (
+        binding.target,
+        binding.component,
+        binding.path.clone(),
+        binding.op.clone(),
+    );
     commands.queue(move |world: &mut World| {
-        write_numeric(world, target, component, &path, ty, value);
+        // `Option` payloads / `Map` values can't be reflect-path-addressed; patch the
+        // container element instead.
+        if matches!(op, FieldOp::OptionInner | FieldOp::MapValue(_)) {
+            apply_patch(world, target, component, &path, &op, boxed_num(ty, value));
+        } else {
+            write_numeric(world, target, component, &path, ty, value);
+        }
     });
+}
+
+/// Box a numeric value as its concrete reflected type (for patching collection elements).
+fn boxed_num(ty: NumTy, value: f64) -> Box<dyn PartialReflect> {
+    match ty {
+        NumTy::F32 | NumTy::ColorR | NumTy::ColorG | NumTy::ColorB | NumTy::ColorA => {
+            Box::new(value as f32)
+        }
+        NumTy::F64 => Box::new(value),
+        NumTy::I32 => Box::new(value as i32),
+        NumTy::I64 => Box::new(value as i64),
+        NumTy::U32 => Box::new(value as u32),
+        NumTy::U64 => Box::new(value as u64),
+        NumTy::Usize => Box::new(value as usize),
+    }
 }
 
 fn write_numeric(
@@ -752,6 +1060,192 @@ fn set_path<T: Reflect>(reflected: &mut dyn Reflect, path: &str, value: T) {
     }
 }
 
+/// Default value for a registered type, if it has [`ReflectDefault`].
+fn default_value(registry: &TypeRegistry, type_id: TypeId) -> Option<Box<dyn PartialReflect>> {
+    let rd = registry.get(type_id)?.data::<ReflectDefault>()?;
+    Some(rd.default().into_partial_reflect())
+}
+
+/// Patch a scalar into a container element that can't be reflect-path-addressed: an
+/// `Option`'s `Some(_)` payload, or a `Map` value (by iteration index).
+fn apply_patch(
+    world: &mut World,
+    target: Entity,
+    component: TypeId,
+    path: &str,
+    op: &FieldOp,
+    patch: Box<dyn PartialReflect>,
+) {
+    let Some(rc) = reflect_component_for(world, component) else {
+        return;
+    };
+    if world.get_entity(target).is_err() {
+        return;
+    }
+    let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target)) else {
+        return;
+    };
+    let Ok(container) = reflected.reflect_path_mut(path) else {
+        return;
+    };
+    apply_element_patch(container, op, &*patch);
+}
+
+/// Patch a scalar into an `Option` payload or a `Map` value held by `container`.
+fn apply_element_patch(
+    container: &mut dyn PartialReflect,
+    op: &FieldOp,
+    patch: &dyn PartialReflect,
+) {
+    match op {
+        FieldOp::OptionInner => {
+            if let ReflectMut::Enum(e) = container.reflect_mut()
+                && let Some(inner) = e.field_at_mut(0)
+            {
+                let _ = inner.try_apply(patch);
+            }
+        }
+        FieldOp::MapValue(i) => {
+            if let ReflectMut::Map(map) = container.reflect_mut() {
+                let Some(key) = map.iter().nth(*i).map(|(k, _)| k.to_dynamic()) else {
+                    return;
+                };
+                let Some(newval) = map.get(&*key).map(|v| {
+                    let mut d = v.to_dynamic();
+                    let _ = d.try_apply(patch);
+                    d
+                }) else {
+                    return;
+                };
+                map.insert_boxed(key, newval);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Perform a structural collection edit (add/remove element, toggle `Option`).
+fn structural_op(world: &mut World, target: Entity, component: TypeId, path: &str, op: &FieldOp) {
+    let Some(rc) = reflect_component_for(world, component) else {
+        return;
+    };
+    if world.get_entity(target).is_err() {
+        return;
+    }
+    let registry_arc = world.resource::<AppTypeRegistry>().0.clone();
+    let registry = registry_arc.read();
+    let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target)) else {
+        return;
+    };
+    let Ok(container) = reflected.reflect_path_mut(path) else {
+        return;
+    };
+    apply_structural(container, op, &registry);
+}
+
+/// Add/remove a list element, toggle an `Option`, or add/remove a map entry on `container`.
+fn apply_structural(container: &mut dyn PartialReflect, op: &FieldOp, registry: &TypeRegistry) {
+    match op {
+        FieldOp::ListAdd => {
+            // Add a copy of the last element, or a default if the list is empty.
+            let item_default = match container.get_represented_type_info() {
+                Some(TypeInfo::List(l)) => default_value(registry, l.item_ty().id()),
+                _ => None,
+            };
+            if let ReflectMut::List(list) = container.reflect_mut() {
+                let new = if list.is_empty() {
+                    item_default
+                } else {
+                    list.get(list.len() - 1).map(PartialReflect::to_dynamic)
+                };
+                if let Some(new) = new {
+                    list.push(new);
+                }
+            }
+        }
+        FieldOp::ListRemove => {
+            if let ReflectMut::List(list) = container.reflect_mut()
+                && !list.is_empty()
+            {
+                list.pop();
+            }
+        }
+        FieldOp::OptionToggle => {
+            let is_some = matches!(container.reflect_ref(), ReflectRef::Enum(e) if e.variant_name() == "Some");
+            if is_some {
+                let _ = container.try_apply(&DynamicEnum::new("None", DynamicVariant::Unit));
+            } else {
+                let inner_ty = match container.get_represented_type_info() {
+                    Some(TypeInfo::Enum(en)) => {
+                        en.iter()
+                            .find(|v| v.name() == "Some")
+                            .and_then(|v| match v {
+                                VariantInfo::Tuple(t) => t.field_at(0).map(|f| f.ty().id()),
+                                _ => None,
+                            })
+                    }
+                    _ => None,
+                };
+                if let Some(inner) = inner_ty.and_then(|tid| default_value(registry, tid)) {
+                    let mut tuple = DynamicTuple::default();
+                    tuple.insert_boxed(inner);
+                    let _ = container
+                        .try_apply(&DynamicEnum::new("Some", DynamicVariant::Tuple(tuple)));
+                }
+            }
+        }
+        FieldOp::MapAdd => {
+            let kv = match container.get_represented_type_info() {
+                Some(TypeInfo::Map(m)) => default_value(registry, m.key_ty().id())
+                    .zip(default_value(registry, m.value_ty().id())),
+                _ => None,
+            };
+            if let Some((k, v)) = kv
+                && let ReflectMut::Map(map) = container.reflect_mut()
+            {
+                map.insert_boxed(k, v);
+            }
+        }
+        FieldOp::MapRemove(i) => {
+            if let ReflectMut::Map(map) = container.reflect_mut() {
+                let key = map.iter().nth(*i).map(|(k, _)| k.to_dynamic());
+                if let Some(key) = key {
+                    map.remove(&*key);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Drive a collection add/remove/toggle button.
+fn on_field_op(act: On<Activate>, bindings: Query<&FieldBinding>, mut commands: Commands) {
+    let Ok(binding) = bindings.get(act.entity) else {
+        return;
+    };
+    if !matches!(
+        binding.op,
+        FieldOp::ListAdd
+            | FieldOp::ListRemove
+            | FieldOp::OptionToggle
+            | FieldOp::MapAdd
+            | FieldOp::MapRemove(_)
+    ) {
+        return;
+    }
+    let (target, component, path, op) = (
+        binding.target,
+        binding.component,
+        binding.path.clone(),
+        binding.op.clone(),
+    );
+    push_undo(&mut commands);
+    commands.queue(move |world: &mut World| {
+        structural_op(world, target, component, &path, &op);
+        world.resource_mut::<InspectorDirty>().0 = true;
+    });
+}
+
 fn on_bool_changed(
     change: On<ValueChange<bool>>,
     bindings: Query<&FieldBinding>,
@@ -763,10 +1257,19 @@ fn on_bool_changed(
     if binding.kind != FieldKind::Bool {
         return;
     }
-    let (target, component, path) = (binding.target, binding.component, binding.path.clone());
+    let (target, component, path, op) = (
+        binding.target,
+        binding.component,
+        binding.path.clone(),
+        binding.op.clone(),
+    );
     let value = change.value;
     push_undo(&mut commands);
     commands.queue(move |world: &mut World| {
+        if matches!(op, FieldOp::OptionInner | FieldOp::MapValue(_)) {
+            apply_patch(world, target, component, &path, &op, Box::new(value));
+            return;
+        }
         let Some(rc) = reflect_component_for(world, component) else {
             return;
         };
@@ -835,8 +1338,17 @@ fn commit_string_fields(
             continue;
         }
         let value = editable.value().to_string();
-        let (target, component, path) = (binding.target, binding.component, binding.path.clone());
+        let (target, component, path, op) = (
+            binding.target,
+            binding.component,
+            binding.path.clone(),
+            binding.op.clone(),
+        );
         commands.queue(move |world: &mut World| {
+            if matches!(op, FieldOp::OptionInner | FieldOp::MapValue(_)) {
+                apply_patch(world, target, component, &path, &op, Box::new(value));
+                return;
+            }
             let Some(rc) = reflect_component_for(world, component) else {
                 return;
             };
@@ -1070,5 +1582,76 @@ fn on_close_inspector_overlay(
 ) {
     for overlay in overlays.iter() {
         commands.entity(overlay).despawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_element_patch, apply_structural, FieldOp};
+    use alloc::collections::BTreeMap;
+    use bevy_reflect::TypeRegistry;
+
+    fn registry() -> TypeRegistry {
+        let mut r = TypeRegistry::default();
+        r.register::<f32>();
+        r.register::<String>();
+        r
+    }
+
+    #[test]
+    fn list_add_clones_last_then_remove_pops() {
+        let reg = registry();
+        let mut v: Vec<f32> = vec![1.0, 2.0];
+        apply_structural(&mut v, &FieldOp::ListAdd, &reg);
+        assert_eq!(v, vec![1.0, 2.0, 2.0], "add copies the last element");
+        apply_structural(&mut v, &FieldOp::ListRemove, &reg);
+        assert_eq!(v, vec![1.0, 2.0], "remove pops the last element");
+    }
+
+    #[test]
+    fn list_add_to_empty_uses_default() {
+        let reg = registry();
+        let mut v: Vec<f32> = vec![];
+        apply_structural(&mut v, &FieldOp::ListAdd, &reg);
+        assert_eq!(
+            v,
+            vec![0.0],
+            "adding to an empty list uses the element default"
+        );
+    }
+
+    #[test]
+    fn list_element_patch_via_option_path_is_noop() {
+        // Sanity: element scalar edits go through reflect paths, not apply_element_patch;
+        // apply_element_patch only handles Option/Map.
+        let reg = registry();
+        let mut v: Vec<f32> = vec![5.0];
+        apply_structural(&mut v, &FieldOp::ListRemove, &reg);
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn option_toggle_and_inner_patch() {
+        let reg = registry();
+        let mut o: Option<f32> = None;
+        apply_structural(&mut o, &FieldOp::OptionToggle, &reg);
+        assert_eq!(o, Some(0.0), "None -> Some(default)");
+        apply_element_patch(&mut o, &FieldOp::OptionInner, &5.0_f32);
+        assert_eq!(o, Some(5.0), "Some payload edited in place");
+        apply_structural(&mut o, &FieldOp::OptionToggle, &reg);
+        assert_eq!(o, None, "Some -> None");
+    }
+
+    #[test]
+    fn map_add_value_edit_remove() {
+        let reg = registry();
+        let mut m: BTreeMap<String, f32> = BTreeMap::new();
+        apply_structural(&mut m, &FieldOp::MapAdd, &reg);
+        assert_eq!(m.len(), 1, "add inserts a default entry");
+        assert_eq!(m.get(""), Some(&0.0));
+        apply_element_patch(&mut m, &FieldOp::MapValue(0), &7.0_f32);
+        assert_eq!(m.get(""), Some(&7.0), "the 0th entry's value was patched");
+        apply_structural(&mut m, &FieldOp::MapRemove(0), &reg);
+        assert!(m.is_empty(), "remove drops the 0th entry");
     }
 }

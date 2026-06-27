@@ -1,10 +1,12 @@
-//! Out-of-process (remote) inspection over the Bevy Remote Protocol (BRP).
+//! Out-of-process (remote) editing over the Bevy Remote Protocol (BRP).
 //!
-//! This is an honest minimal scaffold: it connects to a running Bevy app that has
-//! `RemotePlugin` + `RemoteHttpPlugin` enabled (default `127.0.0.1:15702`), issues a
-//! `world.query` over raw HTTP on a worker thread, and reports how many entities the
-//! remote world contains. It is **read-only** — remote component editing and a full remote
-//! hierarchy/inspector are future work. The local editing path is unaffected.
+//! Connects to a running Bevy app that has `RemotePlugin` + `RemoteHttpPlugin` enabled
+//! (default `127.0.0.1:15702`) and drives it over raw HTTP JSON-RPC on worker threads: it
+//! queries the remote world (reporting its entities) and can **edit** it — spawn an entity,
+//! despawn one, and mutate a component field (`world.spawn_entity` / `world.despawn_entity` /
+//! `world.mutate_components`). The low-level [`brp_request`] helper is public so tools (and the
+//! `editor_verify_remote` harness) can issue any BRP method. The local editing path is
+//! unaffected.
 
 use alloc::sync::Arc;
 use std::io::{Read, Write};
@@ -46,11 +48,29 @@ pub struct OpenConnectDialog;
 #[derive(Event, Clone, Copy)]
 struct RemoteQuery;
 
+/// Remote edit actions issued from the remote-actions overlay.
+#[derive(Event, Clone, Copy)]
+enum RemoteEdit {
+    /// Spawn a new remote entity.
+    Spawn,
+    /// Despawn the first queried remote entity.
+    DespawnOne,
+}
+
+/// A successful query: a human summary plus the queried entity ids.
+struct QueryOk {
+    summary: String,
+    entities: Vec<u64>,
+}
+
 /// Tracks the remote connection and in-flight query.
 #[derive(Resource, Default)]
 struct RemoteState {
-    url: Option<String>,
-    result: Arc<Mutex<Option<Result<String, String>>>>,
+    /// The normalized `host:port` of the connected remote.
+    addr: Option<String>,
+    /// The most recent set of queried remote entity ids.
+    entities: Vec<u64>,
+    result: Arc<Mutex<Option<Result<QueryOk, String>>>>,
     querying: bool,
 }
 
@@ -61,7 +81,7 @@ struct ConnectUrlInput;
 #[derive(Component, Default, Clone, Copy)]
 struct ConnectConfirmButton;
 
-/// Installs the remote-inspection scaffold.
+/// Installs the remote-editing subsystem.
 pub struct RemotePlugin;
 
 impl Plugin for RemotePlugin {
@@ -70,7 +90,8 @@ impl Plugin for RemotePlugin {
             .add_systems(Update, poll_remote)
             .add_observer(on_open_connect_dialog)
             .add_observer(on_connect_confirm)
-            .add_observer(on_remote_query);
+            .add_observer(on_remote_query)
+            .add_observer(on_remote_edit);
     }
 }
 
@@ -95,7 +116,7 @@ fn on_connect_confirm(
     if url.is_empty() {
         return;
     }
-    state.url = Some(url);
+    state.addr = Some(normalize_addr(&url));
     commands.trigger(RemoteQuery);
     commands.trigger(CloseOverlay);
 }
@@ -104,13 +125,16 @@ fn on_remote_query(_: On<RemoteQuery>, mut state: ResMut<RemoteState>, mut comma
     if state.querying {
         return;
     }
-    let Some(url) = state.url.clone() else {
+    let Some(addr) = state.addr.clone() else {
         return;
     };
     state.querying = true;
     let slot = state.result.clone();
     std::thread::spawn(move || {
-        let result = brp_query(&url);
+        let result = brp_query_entities(&addr).map(|entities| QueryOk {
+            summary: format!("Connected to {addr}\n{} entities", entities.len()),
+            entities,
+        });
         *slot.lock().unwrap() = Some(result);
     });
     commands.spawn_scene(message_overlay("Querying remote…"));
@@ -124,42 +148,75 @@ fn poll_remote(mut state: ResMut<RemoteState>, mut commands: Commands) {
     if let Some(result) = taken {
         state.querying = false;
         commands.trigger(CloseOverlay);
-        let message = match result {
-            Ok(summary) => {
-                info!("Remote query ok: {summary}");
-                summary
+        match result {
+            Ok(ok) => {
+                info!("Remote query ok: {}", ok.summary);
+                state.entities = ok.entities;
+                commands.spawn_scene(remote_overlay(ok.summary));
             }
             Err(err) => {
                 error!("Remote query failed: {err}");
-                format!("Remote query failed:\n{err}")
+                commands.spawn_scene(message_overlay(&format!("Remote query failed:\n{err}")));
             }
-        };
-        commands.spawn_scene(message_overlay(&message));
+        }
     }
 }
 
-/// Issue a `world.query` over BRP and summarize the result. Blocking; runs on a worker
-/// thread.
-fn brp_query(url: &str) -> Result<String, String> {
+/// Apply a remote edit (spawn / despawn), then re-query to refresh the actions overlay.
+/// Edits are quick localhost requests, so they run synchronously.
+fn on_remote_edit(edit: On<RemoteEdit>, mut state: ResMut<RemoteState>, mut commands: Commands) {
+    let Some(addr) = state.addr.clone() else {
+        return;
+    };
+    let applied = match *edit {
+        RemoteEdit::Spawn => brp_spawn(&addr).map(|_| ()),
+        RemoteEdit::DespawnOne => match state.entities.first().copied() {
+            Some(id) => brp_despawn(&addr, id).map(|_| ()),
+            None => Err("no remote entities to despawn".to_string()),
+        },
+    };
+    commands.trigger(CloseOverlay);
+    match applied.and_then(|()| brp_query_entities(&addr)) {
+        Ok(entities) => {
+            let summary = format!("Connected to {addr}\n{} entities", entities.len());
+            state.entities = entities;
+            commands.spawn_scene(remote_overlay(summary));
+        }
+        Err(err) => {
+            error!("Remote edit failed: {err}");
+            commands.spawn_scene(message_overlay(&format!("Remote edit failed:\n{err}")));
+        }
+    }
+}
+
+/// Normalize a user-entered `host[:port]` / URL into a `host:port` address.
+pub fn normalize_addr(url: &str) -> String {
     let host_port = url
         .trim()
         .trim_start_matches("http://")
         .trim_start_matches("https://")
         .trim_end_matches('/');
-    let addr = if host_port.contains(':') {
+    if host_port.contains(':') {
         host_port.to_string()
     } else {
-        format!("{host_port}:15702")
-    };
+        format!(
+            "{host_port}:{}",
+            DEFAULT_REMOTE.rsplit(':').next().unwrap_or("15702")
+        )
+    }
+}
 
-    let body =
-        r#"{"jsonrpc":"2.0","id":1,"method":"world.query","params":{"data":{},"filter":{}}}"#;
+/// Issue a single BRP JSON-RPC request (`method` with `params` JSON) over raw HTTP and return
+/// the JSON-RPC response body. Blocking; intended for a worker thread. Errors on transport
+/// failure, a non-200 status, or a JSON-RPC `error` member.
+pub fn brp_request(addr: &str, method: &str, params: &str) -> Result<String, String> {
+    let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{params}}}"#);
     let request = format!(
         "POST / HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
 
-    let mut stream = TcpStream::connect(&addr).map_err(|e| format!("connect failed: {e}"))?;
+    let mut stream = TcpStream::connect(addr).map_err(|e| format!("connect failed: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
@@ -176,13 +233,70 @@ fn brp_query(url: &str) -> Result<String, String> {
     let resp_body = response
         .split_once("\r\n\r\n")
         .map(|(_, b)| b)
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
     if !status_ok || resp_body.contains("\"error\"") {
-        let snippet: String = resp_body.chars().take(200).collect();
+        let snippet: String = resp_body.chars().take(300).collect();
         return Err(format!("remote responded: {snippet}"));
     }
-    let count = resp_body.matches("\"entity\"").count();
-    Ok(format!("Connected to {addr}\n{count} entities (read-only)"))
+    Ok(resp_body)
+}
+
+/// Query all entities (`world.query`) and return their numeric ids.
+pub fn brp_query_entities(addr: &str) -> Result<Vec<u64>, String> {
+    let body = brp_request(addr, "world.query", r#"{"data":{},"filter":{}}"#)?;
+    Ok(parse_entity_ids(&body))
+}
+
+/// Spawn a remote entity carrying a `Transform` and a `Name` (`world.spawn_entity`).
+pub fn brp_spawn(addr: &str) -> Result<String, String> {
+    let params = r#"{"components":{
+        "bevy_transform::components::transform::Transform":{"translation":[0.0,0.0,0.0],"rotation":[0.0,0.0,0.0,1.0],"scale":[1.0,1.0,1.0]},
+        "bevy_ecs::name::Name":"Remote Entity"
+    }}"#;
+    brp_request(addr, "world.spawn_entity", params)
+}
+
+/// Despawn a remote entity (`world.despawn_entity`).
+pub fn brp_despawn(addr: &str, entity: u64) -> Result<String, String> {
+    brp_request(
+        addr,
+        "world.despawn_entity",
+        &format!(r#"{{"entity":{entity}}}"#),
+    )
+}
+
+/// Mutate a field of a remote entity's component (`world.mutate_components`).
+pub fn brp_mutate(
+    addr: &str,
+    entity: u64,
+    component: &str,
+    path: &str,
+    value_json: &str,
+) -> Result<String, String> {
+    let params = format!(
+        r#"{{"entity":{entity},"component":"{component}","path":"{path}","value":{value_json}}}"#
+    );
+    brp_request(addr, "world.mutate_components", &params)
+}
+
+/// Crude extraction of numeric `"entity": <id>` values from a BRP response body.
+pub fn parse_entity_ids(body: &str) -> Vec<u64> {
+    const KEY: &str = "\"entity\":";
+    let mut ids = Vec::new();
+    let mut rest = body;
+    while let Some(idx) = rest.find(KEY) {
+        rest = &rest[idx + KEY.len()..];
+        let digits: String = rest
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(id) = digits.parse::<u64>() {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +340,54 @@ fn connect_dialog() -> impl Scene {
                             (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Connect") ThemedText } }
                                 ConnectConfirmButton),
                             (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Cancel") ThemedText } }
+                                on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
+                        ]
+                    ),
+                ]
+            ),
+        ]
+    }
+}
+
+/// The remote-actions overlay: the connection summary plus spawn / despawn / refresh edits.
+fn remote_overlay(message: String) -> impl Scene {
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            width: percent(100),
+            height: percent(100),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+        }
+        EditorEntity
+        EditorOverlay
+        GlobalZIndex(2000)
+        on(|_: On<Pointer<Click>>, mut c: Commands| { c.trigger(CloseOverlay); })
+        Children [
+            (
+                Node {
+                    width: px(380),
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Column,
+                    padding: px(12),
+                    row_gap: px(10),
+                }
+                EditorEntity
+                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
+                GlobalZIndex(2001)
+                on(stop_click)
+                Children [
+                    (Node { padding: UiRect::axes(px(2), px(2)) } Children [ label(message) ]),
+                    (
+                        Node { display: Display::Flex, flex_direction: FlexDirection::Row, column_gap: px(6), flex_wrap: bevy_ui::FlexWrap::Wrap, row_gap: px(6) }
+                        Children [
+                            (@FeathersButton { @variant: ButtonVariant::Primary, @caption: bsn! { Text("Spawn") ThemedText } }
+                                on(|_: On<Activate>, mut c: Commands| { c.trigger(RemoteEdit::Spawn); })),
+                            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Despawn one") ThemedText } }
+                                on(|_: On<Activate>, mut c: Commands| { c.trigger(RemoteEdit::DespawnOne); })),
+                            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Refresh") ThemedText } }
+                                on(|_: On<Activate>, mut c: Commands| { c.trigger(RemoteQuery); })),
+                            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Close") ThemedText } }
                                 on(|_: On<Activate>, mut c: Commands| { c.trigger(CloseOverlay); })),
                         ]
                     ),

@@ -100,6 +100,37 @@ pub struct GizmoDrag {
     /// Whether the axis constraint has been decided for the current gesture (decided on
     /// the first drag frame from the initial drag direction).
     pub chosen: bool,
+    /// Raw angle accumulated over a rotate gesture (radians), used so snapping can apply
+    /// clean stepped increments rather than quantizing each tiny per-frame delta.
+    pub accum: f32,
+    /// Snapped angle already applied this rotate gesture (radians).
+    pub applied: f32,
+}
+
+/// Grid/angle snapping for gizmo manipulation. When [`enabled`](Self::enabled) (toolbar
+/// toggle) or while a modifier key is held, translate snaps each moved entity to a position
+/// grid, scale snaps to a scale grid, and rotate applies in fixed angular steps.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct GizmoSnap {
+    /// Whether snapping is toggled on (independent of the held-modifier shortcut).
+    pub enabled: bool,
+    /// Translate grid increment, in world units.
+    pub translate: f32,
+    /// Rotate increment, in radians.
+    pub rotate: f32,
+    /// Scale grid increment.
+    pub scale: f32,
+}
+
+impl Default for GizmoSnap {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            translate: 0.5,
+            rotate: core::f32::consts::FRAC_PI_8, // 22.5°
+            scale: 0.25,
+        }
+    }
 }
 
 /// Whether the gizmo operates in world or local space.

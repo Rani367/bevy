@@ -36,6 +36,10 @@ pub mod viewport;
 
 pub use actions::*;
 pub use markers::*;
+pub use remote::{
+    brp_despawn, brp_mutate, brp_query_entities, brp_request, brp_spawn, normalize_addr,
+    parse_entity_ids,
+};
 pub use scripting::BehaviorScript;
 pub use spawning::*;
 pub use state::*;
@@ -107,6 +111,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<GizmoMode>()
             .init_resource::<GizmoSpace>()
             .init_resource::<GizmoDrag>()
+            .init_resource::<GizmoSnap>()
             .init_resource::<ViewportMode>()
             .init_state::<EditorState>();
 

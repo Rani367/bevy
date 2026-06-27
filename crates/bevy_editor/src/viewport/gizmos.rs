@@ -13,13 +13,15 @@ use bevy_camera::Camera;
 use bevy_color::Color;
 use bevy_ecs::prelude::*;
 use bevy_gizmos::gizmos::Gizmos;
+use bevy_input::keyboard::KeyCode;
+use bevy_input::ButtonInput;
 use bevy_math::{Isometry3d, Quat, Vec2, Vec3};
 use bevy_picking::events::{Drag, DragEnd, DragStart, Pointer};
 use bevy_picking::pointer::PointerButton;
 use bevy_transform::components::{GlobalTransform, Transform};
 
 use crate::markers::{GameCamera, SceneEntity};
-use crate::state::{EditorSelection, GizmoDrag, GizmoMode, GizmoSpace, ViewportMode};
+use crate::state::{EditorSelection, GizmoDrag, GizmoMode, GizmoSnap, GizmoSpace, ViewportMode};
 use crate::undo::push_undo;
 
 const ROTATE_SENSITIVITY: f32 = 0.01;
@@ -131,6 +133,8 @@ pub fn begin_gizmo_drag(
     gizmo_drag.active = true;
     gizmo_drag.chosen = false;
     gizmo_drag.axis = None;
+    gizmo_drag.accum = 0.0;
+    gizmo_drag.applied = 0.0;
 }
 
 /// End a gizmo drag: clear the per-gesture axis state.
@@ -138,6 +142,8 @@ pub fn end_gizmo_drag(_: On<Pointer<DragEnd>>, mut gizmo_drag: ResMut<GizmoDrag>
     gizmo_drag.active = false;
     gizmo_drag.chosen = false;
     gizmo_drag.axis = None;
+    gizmo_drag.accum = 0.0;
+    gizmo_drag.applied = 0.0;
 }
 
 /// Apply a gizmo drag to the selection according to the active [`GizmoMode`].
@@ -151,11 +157,19 @@ pub fn gizmo_drag(
     mode: Res<GizmoMode>,
     space: Res<GizmoSpace>,
     vmode: Res<ViewportMode>,
+    snap: Res<GizmoSnap>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut gizmo_drag: ResMut<GizmoDrag>,
 ) {
     if drag.button != PointerButton::Primary {
         return;
     }
+    // Snapping is on while the toolbar toggle is set, or while a Ctrl/Cmd modifier is held.
+    let snapping = snap.enabled
+        || keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight)
+        || keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight);
     let entity = drag.entity;
     if !scene_q.contains(entity) {
         return;
@@ -172,9 +186,11 @@ pub fn gizmo_drag(
         .map(|t| t.rotation)
         .unwrap_or(Quat::IDENTITY);
 
-    // Decide the axis constraint once, on the first drag frame (translate / 3D only).
+    // Decide the axis constraint once, on the first drag frame (translate / scale, 3D only).
     if !gizmo_drag.chosen {
-        gizmo_drag.axis = if *mode == GizmoMode::Translate && *vmode == ViewportMode::ThreeD {
+        gizmo_drag.axis = if matches!(*mode, GizmoMode::Translate | GizmoMode::Scale)
+            && *vmode == ViewportMode::ThreeD
+        {
             choose_axis(drag.delta, pivot, cam, cam_global, *space, local_rot)
         } else {
             None
@@ -215,37 +231,95 @@ pub fn gizmo_drag(
             for e in targets {
                 if let Ok(mut t) = transforms.get_mut(e) {
                     t.translation += world_delta;
+                    if snapping {
+                        t.translation = snap_vec(t.translation, snap.translate);
+                    }
                 }
             }
         }
         GizmoMode::Rotate => {
-            let angle = drag.delta.x * ROTATE_SENSITIVITY;
-            for e in targets {
-                let Ok(mut t) = transforms.get_mut(e) else {
-                    continue;
-                };
-                match (*vmode, *space) {
-                    (ViewportMode::TwoD, _) => {
-                        t.rotation = Quat::from_rotation_z(angle) * t.rotation;
-                    }
-                    (_, GizmoSpace::World) => {
-                        t.rotation = Quat::from_axis_angle(Vec3::Y, angle) * t.rotation;
-                    }
-                    (_, GizmoSpace::Local) => {
-                        t.rotation *= Quat::from_axis_angle(Vec3::Y, angle);
+            // Snapping accumulates the raw angle and applies it in clean stepped increments;
+            // otherwise the raw per-frame angle is applied directly.
+            let raw = drag.delta.x * ROTATE_SENSITIVITY;
+            let angle = if snapping {
+                gizmo_drag.accum += raw;
+                let snapped = (gizmo_drag.accum / snap.rotate).round() * snap.rotate;
+                let delta = snapped - gizmo_drag.applied;
+                gizmo_drag.applied = snapped;
+                delta
+            } else {
+                raw
+            };
+            if angle != 0.0 {
+                for e in targets {
+                    let Ok(mut t) = transforms.get_mut(e) else {
+                        continue;
+                    };
+                    match (*vmode, *space) {
+                        (ViewportMode::TwoD, _) => {
+                            t.rotation = Quat::from_rotation_z(angle) * t.rotation;
+                        }
+                        (_, GizmoSpace::World) => {
+                            t.rotation = Quat::from_axis_angle(Vec3::Y, angle) * t.rotation;
+                        }
+                        (_, GizmoSpace::Local) => {
+                            t.rotation *= Quat::from_axis_angle(Vec3::Y, angle);
+                        }
                     }
                 }
             }
         }
         GizmoMode::Scale => {
             let factor = (1.0 + (drag.delta.x - drag.delta.y) * SCALE_SENSITIVITY).max(0.01);
+            let axis_index = gizmo_drag.axis.map(dominant_axis_index);
             for e in targets {
                 if let Ok(mut t) = transforms.get_mut(e) {
-                    t.scale *= factor;
+                    match axis_index {
+                        // Axis-constrained: scale only the dominant component.
+                        Some(i) => t.scale[i] = (t.scale[i] * factor).max(0.001),
+                        // Free: uniform scale.
+                        None => t.scale *= factor,
+                    }
+                    if snapping {
+                        t.scale = snap_scale(t.scale, snap.scale);
+                    }
                 }
             }
         }
     }
+}
+
+/// The index (0=x, 1=y, 2=z) of the axis with the largest absolute component.
+fn dominant_axis_index(axis: Vec3) -> usize {
+    let a = axis.abs();
+    if a.x >= a.y && a.x >= a.z {
+        0
+    } else if a.y >= a.z {
+        1
+    } else {
+        2
+    }
+}
+
+/// Round each component to the nearest multiple of `step` (no-op for a non-positive step).
+fn snap_vec(v: Vec3, step: f32) -> Vec3 {
+    if step <= 0.0 {
+        return v;
+    }
+    Vec3::new(
+        (v.x / step).round() * step,
+        (v.y / step).round() * step,
+        (v.z / step).round() * step,
+    )
+}
+
+/// Snap a scale to a grid, keeping each component at least one step (never zero/negative).
+fn snap_scale(v: Vec3, step: f32) -> Vec3 {
+    if step <= 0.0 {
+        return v;
+    }
+    let snap = |x: f32| ((x / step).round() * step).max(step);
+    Vec3::new(snap(v.x), snap(v.y), snap(v.z))
 }
 
 /// Pick the world-space axis whose screen projection best matches the drag direction, or
@@ -284,4 +358,37 @@ fn choose_axis(
         }
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dominant_axis_index, snap_scale, snap_vec};
+    use bevy_math::Vec3;
+
+    #[test]
+    fn dominant_axis_picks_largest_component() {
+        assert_eq!(dominant_axis_index(Vec3::new(0.9, 0.1, 0.2)), 0);
+        assert_eq!(dominant_axis_index(Vec3::new(0.1, -0.8, 0.3)), 1);
+        assert_eq!(dominant_axis_index(Vec3::new(0.2, 0.3, 0.95)), 2);
+        // Local-space rotated axes still map to their dominant world component.
+        assert_eq!(dominant_axis_index(Vec3::new(0.7, 0.71, 0.0)), 1);
+    }
+
+    #[test]
+    fn snap_vec_rounds_each_component_to_grid() {
+        let s = snap_vec(Vec3::new(1.2, -0.34, 0.76), 0.5);
+        assert_eq!(s, Vec3::new(1.0, -0.5, 1.0));
+        // A non-positive step is a no-op.
+        let v = Vec3::new(1.23, 4.56, 7.89);
+        assert_eq!(snap_vec(v, 0.0), v);
+    }
+
+    #[test]
+    fn snap_scale_grids_and_never_collapses() {
+        let s = snap_scale(Vec3::new(1.1, 0.05, 2.34), 0.25);
+        // 1.1 -> 1.0, 0.05 -> clamped up to one step (0.25), 2.34 -> 2.25.
+        assert!((s.x - 1.0).abs() < 1e-6);
+        assert!((s.y - 0.25).abs() < 1e-6);
+        assert!((s.z - 2.25).abs() < 1e-6);
+    }
 }

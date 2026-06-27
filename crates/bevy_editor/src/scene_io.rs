@@ -1,15 +1,18 @@
-//! Scene file save/load plus the asset browser. Scenes are stored in a small
-//! editor-controlled RON format (`assets/scenes/*.ron`): one node per scene entity with
-//! its [`SpawnKind`] and transform. On load each node is rebuilt with [`spawn_kind`], so
-//! runtime-generated meshes/materials are recreated fresh rather than round-tripped
-//! through asset handles (which don't survive a despawn). The in-memory play-mode
-//! snapshot uses `DynamicWorld` instead, where asset handles stay valid.
+//! Scene file save/load plus the asset browser. Scenes are full `DynamicWorld`
+//! serializations (`assets/scenes/*.scn.ron`): every [`SceneEntity`]'s reflected components
+//! **and parent links** are written, except the runtime-built mesh/material/sprite and the
+//! computed transform/visibility components, which can't round-trip through asset handles and
+//! are rebuilt from each entity's [`SpawnedAs`] on load. So arbitrary reflected components and
+//! the scene hierarchy persist to disk; only the procedural geometry is regenerated. (The
+//! in-memory play-mode/undo snapshot keeps the live `DynamicWorld` with handles intact.)
 
 use bevy_app::{App, Plugin, Update};
 use bevy_asset::{AssetServer, Assets, Handle};
-use bevy_camera::visibility::Visibility;
-use bevy_ecs::name::Name;
+use bevy_camera::visibility::{InheritedVisibility, ViewVisibility, VisibilityClass};
+use bevy_ecs::entity::EntityHashMap;
 use bevy_ecs::prelude::*;
+use bevy_ecs::reflect::AppTypeRegistry;
+use bevy_ecs::world::CommandQueue;
 use bevy_feathers::controls::{
     ButtonVariant, FeathersButton, FeathersTextInput, FeathersTextInputContainer,
 };
@@ -20,15 +23,16 @@ use bevy_feathers::tokens;
 use bevy_image::Image;
 use bevy_input_focus::AutoFocus;
 use bevy_log::{error, info};
-use bevy_math::{Quat, Vec3};
-use bevy_mesh::Mesh;
-use bevy_pbr::StandardMaterial;
+use bevy_math::Vec3;
+use bevy_mesh::{Mesh, Mesh3d};
+use bevy_pbr::{MeshMaterial3d, StandardMaterial};
 use bevy_picking::events::{Click, Pointer};
 use bevy_picking::Pickable;
 use bevy_scene::prelude::*;
 use bevy_scene::EntityScene;
+use bevy_sprite::Sprite;
 use bevy_text::EditableText;
-use bevy_transform::components::Transform;
+use bevy_transform::components::{GlobalTransform, Transform};
 use bevy_ui::widget::{ImageNode, Text};
 use bevy_ui::{
     percent, px, AlignItems, Display, FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow,
@@ -36,19 +40,23 @@ use bevy_ui::{
 };
 use bevy_ui_widgets::{Activate, ScrollArea};
 use bevy_window::SystemCursorIcon;
-use serde::{Deserialize, Serialize};
+use bevy_world_serialization::serde::WorldDeserializer;
+use bevy_world_serialization::DynamicWorldBuilder;
+use serde::de::DeserializeSeed;
 
 use crate::actions::{OpenImportDialog, OpenOpenDialog, OpenSaveDialog, SceneIoRequest, SpawnKind};
 use crate::markers::{EditorEntity, SceneEntity};
-use crate::spawning::{spawn_kind, SpawnedAs};
+use crate::spawning::{apply_kind_visuals, spawn_kind, SpawnedAs};
 use crate::state::EditorSelection;
 use crate::ui::{stop_click, AssetContent, CloseOverlay, EditorOverlay, SeedText};
 use crate::undo::push_undo;
 
 /// Directory (relative to the working dir) where scene files live.
 const SCENES_DIR: &str = "assets/scenes";
+/// Scene-file extension. Scenes are full `DynamicWorld` serializations.
+const SCENE_EXT: &str = ".scn.ron";
 /// Fallback file name used by *Save* when no scene has been named yet.
-const DEFAULT_SCENE: &str = "scene.ron";
+const DEFAULT_SCENE: &str = "scene.scn.ron";
 
 /// The currently-open scene file, if any.
 #[derive(Resource, Default)]
@@ -65,39 +73,6 @@ struct AssetBrowserDirty(bool);
 #[derive(Component, Default, Clone)]
 struct AssetEntry {
     name: String,
-}
-
-/// Serialized scene: a flat list of nodes.
-#[derive(Serialize, Deserialize)]
-struct EditorScene {
-    nodes: Vec<EditorNode>,
-}
-
-/// One serialized scene entity. Beyond the spawn kind + transform, editor-editable
-/// component data that the loader can re-apply is stored too (currently visibility).
-#[derive(Serialize, Deserialize)]
-struct EditorNode {
-    name: String,
-    kind: SpawnKind,
-    translation: [f32; 3],
-    rotation: [f32; 4],
-    scale: [f32; 3],
-    #[serde(default = "default_visible")]
-    visible: bool,
-}
-
-fn default_visible() -> bool {
-    true
-}
-
-impl EditorNode {
-    fn transform(&self) -> Transform {
-        Transform {
-            translation: Vec3::from_array(self.translation),
-            rotation: Quat::from_array(self.rotation),
-            scale: Vec3::from_array(self.scale),
-        }
-    }
 }
 
 /// Installs scene save/load and the asset browser.
@@ -129,7 +104,6 @@ fn on_scene_io(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     scene_entities: Query<Entity, With<SceneEntity>>,
-    save_query: Query<(&Name, &Transform, &SpawnedAs, Option<&Visibility>), With<SceneEntity>>,
     mut current: ResMut<CurrentScene>,
     mut selection: ResMut<EditorSelection>,
     mut browser_dirty: ResMut<AssetBrowserDirty>,
@@ -151,70 +125,63 @@ fn on_scene_io(
             info!("New scene");
         }
         SceneIoRequest::Save => {
-            let name = current
-                .path
-                .clone()
-                .unwrap_or_else(|| DEFAULT_SCENE.to_string());
-            if save_scene(&save_query, &name).is_ok() {
-                current.path = Some(name);
-                browser_dirty.0 = true;
-            }
+            let name = ensure_ext(
+                current
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_SCENE.to_string()),
+            );
+            current.path = Some(name.clone());
+            browser_dirty.0 = true;
+            commands.queue(move |world: &mut World| {
+                if let Err(err) = write_scene(world, &name) {
+                    error!("Save failed: {err}");
+                }
+            });
         }
         SceneIoRequest::SaveAs(name) => {
-            if save_scene(&save_query, name).is_ok() {
-                current.path = Some(name.clone());
-                browser_dirty.0 = true;
-            }
+            let name = ensure_ext(name.clone());
+            current.path = Some(name.clone());
+            browser_dirty.0 = true;
+            commands.queue(move |world: &mut World| {
+                if let Err(err) = write_scene(world, &name) {
+                    error!("Save failed: {err}");
+                }
+            });
         }
-        SceneIoRequest::Open(name) => match load_scene(name) {
-            Ok(scene) => {
-                push_undo(&mut commands);
-                clear_scene(&scene_entities, &mut commands);
-                selection.clear();
-                for node in &scene.nodes {
-                    let entity = spawn_kind(
-                        &mut commands,
-                        &mut meshes,
-                        &mut materials,
-                        node.kind,
-                        node.transform(),
-                        node.name.clone(),
-                    );
-                    if !node.visible {
-                        commands.entity(entity).insert(Visibility::Hidden);
-                    }
-                }
-                current.path = Some(name.clone());
-                info!("Opened scene '{name}' ({} entities)", scene.nodes.len());
-            }
-            Err(err) => error!("Failed to open scene '{name}': {err}"),
-        },
-        SceneIoRequest::Instantiate(name) => match load_scene(name) {
-            Ok(scene) => {
-                push_undo(&mut commands);
-                let mut last = None;
-                for node in &scene.nodes {
-                    let entity = spawn_kind(
-                        &mut commands,
-                        &mut meshes,
-                        &mut materials,
-                        node.kind,
-                        node.transform(),
-                        node.name.clone(),
-                    );
-                    if !node.visible {
-                        commands.entity(entity).insert(Visibility::Hidden);
-                    }
-                    last = Some(entity);
-                }
-                if let Some(entity) = last {
-                    selection.set_single(entity);
-                }
-                info!("Instantiated '{name}' (+{} entities)", scene.nodes.len());
-            }
-            Err(err) => error!("Failed to instantiate '{name}': {err}"),
-        },
+        SceneIoRequest::Open(name) => {
+            push_undo(&mut commands);
+            current.path = Some(name.clone());
+            let name = name.clone();
+            commands.queue(
+                move |world: &mut World| match open_scene(world, &name, true) {
+                    Ok(n) => info!("Opened scene '{name}' ({n} entities)"),
+                    Err(err) => error!("Failed to open scene '{name}': {err}"),
+                },
+            );
+        }
+        SceneIoRequest::Instantiate(name) => {
+            push_undo(&mut commands);
+            let name = name.clone();
+            commands.queue(
+                move |world: &mut World| match open_scene(world, &name, false) {
+                    Ok(n) => info!("Instantiated '{name}' (+{n} entities)"),
+                    Err(err) => error!("Failed to instantiate '{name}': {err}"),
+                },
+            );
+        }
     }
+}
+
+/// Append the scene extension if `name` doesn't already end in it (tolerating a bare `.ron`).
+fn ensure_ext(mut name: String) -> String {
+    if !name.ends_with(SCENE_EXT) {
+        if let Some(stripped) = name.strip_suffix(".ron") {
+            name = stripped.to_string();
+        }
+        name.push_str(SCENE_EXT);
+    }
+    name
 }
 
 fn clear_scene(scene_entities: &Query<Entity, With<SceneEntity>>, commands: &mut Commands) {
@@ -223,24 +190,12 @@ fn clear_scene(scene_entities: &Query<Entity, With<SceneEntity>>, commands: &mut
     }
 }
 
-fn save_scene(
-    save_query: &Query<(&Name, &Transform, &SpawnedAs, Option<&Visibility>), With<SceneEntity>>,
-    name: &str,
-) -> Result<(), String> {
-    let nodes: Vec<EditorNode> = save_query
-        .iter()
-        .map(|(entity_name, transform, spawned, visibility)| EditorNode {
-            name: entity_name.as_str().to_string(),
-            kind: spawned.0,
-            translation: transform.translation.to_array(),
-            rotation: transform.rotation.to_array(),
-            scale: transform.scale.to_array(),
-            visible: !matches!(visibility, Some(Visibility::Hidden)),
-        })
-        .collect();
-
-    let ron = ron::ser::to_string_pretty(&EditorScene { nodes }, ron::ser::PrettyConfig::default())
-        .map_err(|e| e.to_string())?;
+/// Serialize every `SceneEntity` — its reflected components *and parent links* — to a
+/// `.scn.ron` file via [`DynamicWorld`]. The runtime-built mesh/material/sprite and the
+/// computed transform/visibility components are denied (they can't round-trip through asset
+/// handles and are rebuilt from each entity's [`SpawnedAs`] on load).
+fn write_scene(world: &mut World, name: &str) -> Result<(), String> {
+    let ron = scene_to_ron(world)?;
     std::fs::create_dir_all(SCENES_DIR).map_err(|e| e.to_string())?;
     let path = format!("{SCENES_DIR}/{name}");
     std::fs::write(&path, ron).map_err(|e| e.to_string())?;
@@ -248,10 +203,94 @@ fn save_scene(
     Ok(())
 }
 
-fn load_scene(name: &str) -> Result<EditorScene, String> {
+/// Serialize the scene (all `SceneEntity` components + parent links, minus runtime visuals)
+/// to a RON string. Split out from [`write_scene`] so the round-trip is unit-testable.
+fn scene_to_ron(world: &mut World) -> Result<String, String> {
+    let registry = world.resource::<AppTypeRegistry>().clone();
+    let ids: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<SceneEntity>>();
+        q.iter(world).collect()
+    };
+    let registry = registry.read();
+    let dynamic = DynamicWorldBuilder::from_world(world, &registry)
+        .allow_all_components()
+        .deny_component::<Mesh3d>()
+        .deny_component::<MeshMaterial3d<StandardMaterial>>()
+        .deny_component::<Sprite>()
+        .deny_component::<GlobalTransform>()
+        .deny_component::<InheritedVisibility>()
+        .deny_component::<ViewVisibility>()
+        // Computed render bookkeeping that holds non-serializable `TypeId`s.
+        .deny_component::<VisibilityClass>()
+        .extract_entities(ids.into_iter())
+        .build();
+    dynamic.serialize(&registry).map_err(|e| e.to_string())
+}
+
+/// Load a `.scn.ron` file, restoring components + parent links and rebuilding mesh/sprite
+/// visuals from each entity's `SpawnedAs`. `clear` despawns the current scene first (Open);
+/// otherwise the loaded entities are added to it (Instantiate / prefab drop). Returns the
+/// number of entities written.
+fn open_scene(world: &mut World, name: &str, clear: bool) -> Result<usize, String> {
     let path = format!("{SCENES_DIR}/{name}");
-    let ron = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    ron::from_str::<EditorScene>(&ron).map_err(|e| e.to_string())
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let registry = world.resource::<AppTypeRegistry>().clone();
+
+    let dynamic = {
+        let registry = registry.read();
+        // The deny-filter means no asset handles are stored; the `AssetServer` is the correct
+        // general handle loader regardless.
+        let mut asset_server = world.resource::<AssetServer>().clone();
+        let seed = WorldDeserializer {
+            type_registry: &registry,
+            load_from_path: &mut asset_server,
+        };
+        let mut de = ron::Deserializer::from_str(&content).map_err(|e| e.to_string())?;
+        seed.deserialize(&mut de).map_err(|e| e.to_string())?
+    };
+
+    if clear {
+        let ids: Vec<Entity> = {
+            let mut q = world.query_filtered::<Entity, With<SceneEntity>>();
+            q.iter(world).collect()
+        };
+        for entity in ids {
+            if let Ok(entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.despawn();
+            }
+        }
+    }
+
+    let mut map = EntityHashMap::default();
+    dynamic
+        .write_to_world(world, &mut map)
+        .map_err(|e| format!("{e:?}"))?;
+
+    let specs: Vec<(Entity, SpawnKind)> = map
+        .values()
+        .copied()
+        .filter_map(|e| world.get::<SpawnedAs>(e).map(|s| (e, s.0)))
+        .collect();
+    rebuild_visuals(world, &specs);
+
+    world.resource_mut::<EditorSelection>().clear();
+    Ok(specs.len())
+}
+
+/// Re-apply runtime mesh/material/sprite visuals for freshly-loaded entities.
+fn rebuild_visuals(world: &mut World, specs: &[(Entity, SpawnKind)]) {
+    world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+        world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+            let mut queue = CommandQueue::default();
+            {
+                let mut commands = Commands::new(&mut queue, world);
+                for &(entity, kind) in specs {
+                    apply_kind_visuals(&mut commands, &mut meshes, &mut materials, kind, entity);
+                }
+            }
+            queue.apply(world);
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +381,7 @@ fn list_scene_files() -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir(SCENES_DIR) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && name.ends_with(".ron")
+                && name.ends_with(SCENE_EXT)
             {
                 files.push(name.to_string());
             }
@@ -413,14 +452,11 @@ fn on_save_confirm(
     let Some(text) = inputs.iter().next().map(|e| e.value().to_string()) else {
         return;
     };
-    let mut name = text.trim().to_string();
+    let name = text.trim().to_string();
     if name.is_empty() {
         return;
     }
-    if !name.ends_with(".ron") {
-        name.push_str(".ron");
-    }
-    commands.trigger(SceneIoRequest::SaveAs(name));
+    commands.trigger(SceneIoRequest::SaveAs(ensure_ext(name)));
     commands.trigger(CloseOverlay);
 }
 
@@ -646,5 +682,102 @@ fn import_dialog() -> impl Scene {
                 ]
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_asset::{AssetPath, LoadFromPath, UntypedHandle};
+    use bevy_ecs::hierarchy::ChildOf;
+    use bevy_reflect::Reflect;
+    use core::any::TypeId;
+
+    /// A custom, user-style reflected component to prove arbitrary components round-trip.
+    #[derive(Component, Reflect, Default, Debug, PartialEq)]
+    #[reflect(Component)]
+    struct Tag {
+        value: i32,
+    }
+
+    /// Deny-filtered scenes never store asset handles, so the loader is never called.
+    struct NoLoader;
+    impl LoadFromPath for NoLoader {
+        fn load_from_path_erased(&mut self, _t: TypeId, _p: AssetPath<'static>) -> UntypedHandle {
+            unreachable!("a deny-filtered scene contains no asset handles")
+        }
+    }
+
+    fn registry() -> AppTypeRegistry {
+        let reg = AppTypeRegistry::default();
+        {
+            let mut w = reg.write();
+            w.register::<Transform>();
+            w.register::<ChildOf>();
+            w.register::<SceneEntity>();
+            w.register::<SpawnedAs>();
+            w.register::<Tag>();
+        }
+        reg
+    }
+
+    #[test]
+    fn roundtrips_parent_links_and_arbitrary_components() {
+        let reg = registry();
+
+        let mut src = World::new();
+        src.insert_resource(reg.clone());
+        let parent = src
+            .spawn((
+                SceneEntity,
+                SpawnedAs(SpawnKind::Empty),
+                Transform::from_xyz(1.0, 2.0, 3.0),
+            ))
+            .id();
+        src.spawn((
+            SceneEntity,
+            SpawnedAs(SpawnKind::Cube),
+            Transform::default(),
+            Tag { value: 42 },
+            ChildOf(parent),
+        ));
+
+        let ron = scene_to_ron(&mut src).expect("serialize");
+
+        // Deserialize into a completely fresh world (fresh entity ids).
+        let mut dst = World::new();
+        dst.insert_resource(reg.clone());
+        let dynamic = {
+            let registry = reg.read();
+            let mut loader = NoLoader;
+            let seed = WorldDeserializer {
+                type_registry: &registry,
+                load_from_path: &mut loader,
+            };
+            let mut de = ron::Deserializer::from_str(&ron).expect("ron");
+            seed.deserialize(&mut de).expect("deserialize")
+        };
+        let mut map = EntityHashMap::default();
+        dynamic.write_to_world(&mut dst, &mut map).expect("write");
+
+        // Two scene entities restored.
+        let mut scene_q = dst.query_filtered::<Entity, With<SceneEntity>>();
+        assert_eq!(scene_q.iter(&dst).count(), 2);
+
+        // The child's parent link survived and was remapped to the new parent entity.
+        let mut child_q = dst.query_filtered::<&ChildOf, With<SceneEntity>>();
+        let parents: Vec<Entity> = child_q.iter(&dst).map(ChildOf::parent).collect();
+        assert_eq!(parents.len(), 1, "exactly one entity is parented");
+        let restored_parent = parents[0];
+        assert_eq!(
+            dst.get::<Transform>(restored_parent).unwrap().translation,
+            Vec3::new(1.0, 2.0, 3.0),
+            "parent's saved transform survived"
+        );
+
+        // The arbitrary custom component value survived.
+        let mut tag_q = dst.query::<&Tag>();
+        let values: Vec<i32> = tag_q.iter(&dst).map(|t| t.value).collect();
+        assert_eq!(values, vec![42]);
     }
 }

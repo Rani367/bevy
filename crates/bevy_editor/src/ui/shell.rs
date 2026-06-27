@@ -14,12 +14,13 @@ use bevy_feathers::{
     theme::{ThemeBackgroundColor, ThemedText},
     tokens,
 };
+use bevy_picking::Pickable;
 use bevy_scene::prelude::*;
 use bevy_state::state::NextState;
 use bevy_ui::widget::Text;
 use bevy_ui::{
-    percent, px, AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, IsDefaultUiCamera, Node,
-    Overflow, UiRect,
+    percent, px, AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, GlobalZIndex,
+    IsDefaultUiCamera, Node, Overflow, UiRect,
 };
 use bevy_ui_widgets::{Activate, ScrollArea};
 use bevy_window::SystemCursorIcon;
@@ -31,9 +32,12 @@ use crate::actions::{
 use crate::build_export::{BuildProjectRequest, ExportSceneRequest};
 use crate::markers::EditorEntity;
 use crate::remote::OpenConnectDialog;
-use crate::state::{EditorState, GizmoMode, ViewportMode};
+use crate::state::{EditorState, GizmoMode, GizmoSnap, ViewportMode};
 use crate::undo::{RequestRedo, RequestUndo};
 
+use super::docking::{
+    Panel, PanelCollapseButton, PanelContent, PanelFloatButton, PanelHeader, PanelId,
+};
 use super::splitter::{on_splitter_drag, ResizeSide, Splitter};
 use super::{
     AssetContent, EditorUiCamera, HierarchyContent, InspectorContent, TabBarContent, ViewportSlot,
@@ -242,6 +246,8 @@ fn toolbar() -> impl Scene {
             pane_header_divider(),
             (@FeathersToolButton { @caption: bsn! { Text("2D / 3D") ThemedText } }
                 on(|_: On<Activate>, mut m: ResMut<ViewportMode>| { m.toggle(); })),
+            (@FeathersToolButton { @caption: bsn! { Text("Snap") ThemedText } }
+                on(|_: On<Activate>, mut s: ResMut<GizmoSnap>| { s.enabled = !s.enabled; })),
         ]
     }
 }
@@ -296,8 +302,10 @@ fn hierarchy_panel() -> impl Scene {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
         }
+        Panel(PanelId::Hierarchy)
+        GlobalZIndex(0)
         Children [
-            panel_header("Hierarchy"),
+            dockable_header("Hierarchy", PanelId::Hierarchy),
             (
                 Node {
                     flex_grow: 1.0,
@@ -311,6 +319,7 @@ fn hierarchy_panel() -> impl Scene {
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)
                 ScrollArea
                 HierarchyContent
+                PanelContent(PanelId::Hierarchy)
             ),
         ]
     }
@@ -346,8 +355,10 @@ fn inspector_panel() -> impl Scene {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
         }
+        Panel(PanelId::Inspector)
+        GlobalZIndex(0)
         Children [
-            panel_header("Inspector"),
+            dockable_header("Inspector", PanelId::Inspector),
             (
                 Node {
                     flex_grow: 1.0,
@@ -361,6 +372,7 @@ fn inspector_panel() -> impl Scene {
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)
                 ScrollArea
                 InspectorContent
+                PanelContent(PanelId::Inspector)
             ),
         ]
     }
@@ -373,8 +385,10 @@ fn asset_row() -> impl Scene {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
         }
+        Panel(PanelId::Assets)
+        GlobalZIndex(0)
         Children [
-            panel_header("Assets"),
+            dockable_header("Assets", PanelId::Assets),
             (
                 Node {
                     flex_grow: 1.0,
@@ -391,6 +405,7 @@ fn asset_row() -> impl Scene {
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)
                 ScrollArea
                 AssetContent
+                PanelContent(PanelId::Assets)
             ),
         ]
     }
@@ -410,6 +425,29 @@ fn panel_header(title: impl Into<String>) -> impl Scene {
         ThemeBackgroundColor(tokens::PANE_HEADER_BG)
         Children [
             label(title)
+        ]
+    }
+}
+
+/// A header for a dockable panel: a draggable title bar (drag to float/move the panel) with
+/// collapse (`▾`) and float (`⤢`) toggle buttons.
+fn dockable_header(title: impl Into<String>, id: PanelId) -> impl Scene {
+    bsn! {
+        Node {
+            min_height: px(28),
+            padding: UiRect::horizontal(px(8)),
+            align_items: AlignItems::Center,
+            column_gap: px(4),
+        }
+        ThemeBackgroundColor(tokens::PANE_HEADER_BG)
+        PanelHeader(id)
+        Children [
+            // The title area ignores picking so drags fall through to the header itself.
+            (Node { flex_grow: 1.0 } Pickable::IGNORE Children [ (label(title) Pickable::IGNORE) ]),
+            (@FeathersToolButton { @caption: bsn! { Text("\u{25BE}") ThemedText } }
+                PanelCollapseButton(id)),
+            (@FeathersToolButton { @caption: bsn! { Text("\u{2922}") ThemedText } }
+                PanelFloatButton(id)),
         ]
     }
 }

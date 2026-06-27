@@ -5521,15 +5521,6 @@ category = "Tools"
 wasm = false
 
 [[example]]
-name = "editor_verify"
-path = "examples/editor/editor_verify.rs"
-doc-scrape-examples = true
-required-features = ["bevy_editor"]
-
-[package.metadata.example.editor_verify]
-hidden = true
-
-[[example]]
 name = "feathers_number_input"
 path = "examples/ui/widgets/feathers_number_input.rs"
 doc-scrape-examples = true

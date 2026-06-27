@@ -1,0 +1,194 @@
+//! In-window dockable panels: each side panel can be collapsed (its body hidden) or torn
+//! off to float freely within the editor window (and dragged around by its header, then
+//! re-docked). The splitter resize handles are unaffected.
+//!
+//! Layout is data-driven: [`DockState`] records each panel's collapsed/floating state, and
+//! [`apply_dock_layout`] reflects that onto the panels' `Node`s (content `Display`, root
+//! `position_type` + offset + z-index). The shell tags each panel with [`Panel`], its body
+//! with [`PanelContent`], and header controls with [`PanelHeader`] / [`PanelCollapseButton`]
+//! / [`PanelFloatButton`].
+
+use bevy_app::{App, Plugin, Update};
+use bevy_ecs::prelude::*;
+use bevy_math::Vec2;
+use bevy_picking::events::{Drag, Pointer};
+use bevy_platform::collections::HashMap;
+use bevy_ui::{px, Display, GlobalZIndex, Node, PositionType, Val};
+use bevy_ui_widgets::Activate;
+
+/// The dockable side panels (the viewport is the fixed center).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PanelId {
+    /// The entity hierarchy panel.
+    Hierarchy,
+    /// The component inspector panel.
+    Inspector,
+    /// The asset browser panel.
+    Assets,
+}
+
+/// Marks a dockable panel's root node.
+#[derive(Component, Clone, Copy)]
+pub struct Panel(pub PanelId);
+
+/// Marks a dockable panel's body (hidden when the panel is collapsed).
+#[derive(Component, Clone, Copy)]
+pub struct PanelContent(pub PanelId);
+
+/// Marks a panel header (dragging it floats / moves the panel).
+#[derive(Component, Clone, Copy)]
+pub struct PanelHeader(pub PanelId);
+
+/// The collapse/expand toggle button on a panel header.
+#[derive(Component, Clone, Copy)]
+pub struct PanelCollapseButton(pub PanelId);
+
+/// The float/dock toggle button on a panel header.
+#[derive(Component, Clone, Copy)]
+pub struct PanelFloatButton(pub PanelId);
+
+// `Default` impls so these can appear in `bsn!` scenes.
+impl Default for Panel {
+    fn default() -> Self {
+        Self(PanelId::Hierarchy)
+    }
+}
+impl Default for PanelContent {
+    fn default() -> Self {
+        Self(PanelId::Hierarchy)
+    }
+}
+impl Default for PanelHeader {
+    fn default() -> Self {
+        Self(PanelId::Hierarchy)
+    }
+}
+impl Default for PanelCollapseButton {
+    fn default() -> Self {
+        Self(PanelId::Hierarchy)
+    }
+}
+impl Default for PanelFloatButton {
+    fn default() -> Self {
+        Self(PanelId::Hierarchy)
+    }
+}
+
+/// Per-panel dock state.
+#[derive(Clone, Copy, Default)]
+pub struct PanelDock {
+    /// Whether the panel body is hidden.
+    pub collapsed: bool,
+    /// `Some(pos)` if the panel is torn off and floating at `pos` (window pixels); `None` when
+    /// docked in its normal flex slot.
+    pub floating: Option<Vec2>,
+}
+
+/// The dock layout for all panels.
+#[derive(Resource, Default)]
+pub struct DockState {
+    panels: HashMap<PanelId, PanelDock>,
+}
+
+impl DockState {
+    /// The dock state for `id` (read-only view; absent panels are docked + expanded).
+    pub fn get(&self, id: PanelId) -> PanelDock {
+        self.panels.get(&id).copied().unwrap_or_default()
+    }
+    fn entry(&mut self, id: PanelId) -> &mut PanelDock {
+        self.panels.entry(id).or_default()
+    }
+}
+
+/// Z-index for a floating panel (above the docked panels / viewport).
+const FLOAT_Z: i32 = 50;
+/// Default width a panel floats at.
+const FLOAT_SIZE: Vec2 = Vec2::new(80.0, 80.0);
+
+/// Installs the docking systems + header-control observers.
+pub struct DockingPlugin;
+
+impl Plugin for DockingPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<DockState>()
+            .add_systems(Update, apply_dock_layout)
+            .add_observer(on_collapse_button)
+            .add_observer(on_float_button)
+            .add_observer(on_header_drag);
+    }
+}
+
+/// Toggle a panel collapsed/expanded.
+fn on_collapse_button(
+    act: On<Activate>,
+    buttons: Query<&PanelCollapseButton>,
+    mut dock: ResMut<DockState>,
+) {
+    if let Ok(button) = buttons.get(act.entity) {
+        let d = dock.entry(button.0);
+        d.collapsed = !d.collapsed;
+    }
+}
+
+/// Toggle a panel between floating and docked.
+fn on_float_button(
+    act: On<Activate>,
+    buttons: Query<&PanelFloatButton>,
+    mut dock: ResMut<DockState>,
+) {
+    if let Ok(button) = buttons.get(act.entity) {
+        let d = dock.entry(button.0);
+        d.floating = if d.floating.is_some() {
+            None
+        } else {
+            Some(FLOAT_SIZE)
+        };
+    }
+}
+
+/// Dragging a panel header floats it (if docked) and moves it.
+fn on_header_drag(
+    drag: On<Pointer<Drag>>,
+    headers: Query<&PanelHeader>,
+    mut dock: ResMut<DockState>,
+) {
+    if let Ok(header) = headers.get(drag.entity) {
+        let delta = Vec2::new(drag.delta.x, drag.delta.y);
+        let d = dock.entry(header.0);
+        d.floating = Some(d.floating.unwrap_or(FLOAT_SIZE) + delta);
+    }
+}
+
+/// Reflect [`DockState`] onto the panel nodes whenever it changes.
+fn apply_dock_layout(
+    dock: Res<DockState>,
+    mut contents: Query<(&PanelContent, &mut Node), Without<Panel>>,
+    mut panels: Query<(&Panel, &mut Node, &mut GlobalZIndex), Without<PanelContent>>,
+) {
+    if !dock.is_changed() {
+        return;
+    }
+    for (content, mut node) in &mut contents {
+        node.display = if dock.get(content.0).collapsed {
+            Display::None
+        } else {
+            Display::Flex
+        };
+    }
+    for (panel, mut node, mut z) in &mut panels {
+        match dock.get(panel.0).floating {
+            Some(pos) => {
+                node.position_type = PositionType::Absolute;
+                node.left = px(pos.x.max(0.0));
+                node.top = px(pos.y.max(0.0));
+                z.0 = FLOAT_Z;
+            }
+            None => {
+                node.position_type = PositionType::Relative;
+                node.left = Val::Auto;
+                node.top = Val::Auto;
+                z.0 = 0;
+            }
+        }
+    }
+}

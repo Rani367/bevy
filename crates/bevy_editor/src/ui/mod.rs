@@ -2,9 +2,11 @@
 //! Viewport / Inspector / Asset panels) built with `bevy_feathers` and the `bsn!`
 //! scene macro, plus the custom splitter widget Feathers doesn't provide.
 
+pub mod docking;
 mod shell;
 mod splitter;
 
+pub use docking::{DockState, Panel, PanelContent, PanelId};
 pub use splitter::{ResizeSide, Splitter};
 
 use bevy_app::{App, Plugin, Startup, Update};
@@ -46,14 +48,25 @@ pub struct EditorUiCamera;
 #[derive(Component, Clone, Default)]
 pub struct SeedText(pub String);
 
+/// Place alongside [`SeedText`] to make the seeded input a multi-line editor (Enter inserts
+/// a newline instead of submitting), e.g. the script editor.
+#[derive(Component, Default, Clone, Copy)]
+pub struct MultilineSeed;
+
 /// One-shot: when a seeded text input's `EditableText` first appears, replace it with one
-/// containing the seed text, then drop the marker.
+/// containing the seed text (multi-line if [`MultilineSeed`] is present), then drop the marker.
 fn seed_text_inputs(
-    mut q: Query<(Entity, &SeedText, &mut EditableText), Added<EditableText>>,
+    mut q: Query<(Entity, &SeedText, &mut EditableText, Has<MultilineSeed>), Added<EditableText>>,
     mut commands: Commands,
 ) {
-    for (entity, seed, mut editable) in q.iter_mut() {
-        *editable = EditableText::new(&seed.0);
+    for (entity, seed, mut editable, multiline) in q.iter_mut() {
+        let mut seeded = EditableText::new(&seed.0);
+        if multiline {
+            seeded.allow_newlines = true;
+            seeded.visible_lines = Some(8.0);
+            commands.entity(entity).remove::<MultilineSeed>();
+        }
+        *editable = seeded;
         commands.entity(entity).remove::<SeedText>();
     }
 }
@@ -107,7 +120,8 @@ pub struct EditorUiPlugin;
 
 impl Plugin for EditorUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, shell::editor_shell.spawn())
+        app.add_plugins(docking::DockingPlugin)
+            .add_systems(Startup, shell::editor_shell.spawn())
             .add_systems(Update, (seed_text_inputs, close_overlay_on_escape))
             .add_observer(on_close_overlay);
     }

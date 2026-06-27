@@ -21,7 +21,7 @@ use crate::ui::TabBarContent;
 
 /// One open scene tab.
 #[derive(Default)]
-struct SceneTab {
+pub(crate) struct SceneTab {
     name: String,
     /// The tab's scene, captured when it was last switched away from. `None` for a tab
     /// that has never been left (its scene is whatever is currently live) or an empty tab.
@@ -30,9 +30,9 @@ struct SceneTab {
 
 /// The set of open scene tabs and which one is active.
 #[derive(Resource)]
-struct Tabs {
-    tabs: Vec<SceneTab>,
-    active: usize,
+pub(crate) struct Tabs {
+    pub(crate) tabs: Vec<SceneTab>,
+    pub(crate) active: usize,
     dirty: bool,
 }
 
@@ -51,11 +51,11 @@ impl Default for Tabs {
 
 /// Switch to the tab at the given index.
 #[derive(Event, Clone, Copy)]
-struct SwitchTab(usize);
+pub(crate) struct SwitchTab(pub(crate) usize);
 
 /// Open a new, empty scene tab.
 #[derive(Event, Clone, Copy)]
-struct NewTab;
+pub(crate) struct NewTab;
 
 /// Component on a tab button; stores the tab index it activates.
 #[derive(Component, Clone, Copy)]

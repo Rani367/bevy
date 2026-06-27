@@ -55,50 +55,75 @@ pub fn spawn_kind(
     transform: Transform,
     name: impl Into<String>,
 ) -> Entity {
-    let base = Color::srgb(0.8, 0.75, 0.7);
-    let mut entity = commands.spawn((
-        SceneEntity,
-        SpawnedAs(kind),
-        Name::new(name.into()),
-        transform,
-    ));
+    let entity = commands
+        .spawn((
+            SceneEntity,
+            SpawnedAs(kind),
+            Name::new(name.into()),
+            transform,
+        ))
+        .id();
     match kind {
-        SpawnKind::Cube => {
-            entity.insert((
-                Mesh3d(meshes.add(Cuboid::default())),
-                MeshMaterial3d(materials.add(base)),
-            ));
-        }
-        SpawnKind::Sphere => {
-            entity.insert((
-                Mesh3d(meshes.add(Sphere::new(0.5))),
-                MeshMaterial3d(materials.add(base)),
-            ));
-        }
-        SpawnKind::Plane => {
-            entity.insert((
-                Mesh3d(meshes.add(Cuboid::new(5.0, 0.02, 5.0))),
-                MeshMaterial3d(materials.add(base)),
-            ));
-        }
         SpawnKind::PointLight => {
-            entity.insert(PointLight {
+            commands.entity(entity).insert(PointLight {
                 intensity: 1_000_000.0,
                 ..Default::default()
             });
         }
         SpawnKind::DirectionalLight => {
-            entity.insert(DirectionalLight::default());
+            commands.entity(entity).insert(DirectionalLight::default());
+        }
+        SpawnKind::Empty => {
+            commands.entity(entity).insert(Visibility::default());
+        }
+        // Mesh / sprite kinds get their runtime-built visuals from the shared helper.
+        SpawnKind::Cube | SpawnKind::Sphere | SpawnKind::Plane | SpawnKind::Sprite => {
+            apply_kind_visuals(commands, meshes, materials, kind, entity);
+        }
+    }
+    entity
+}
+
+/// Re-create the runtime mesh / material / sprite for a [`SpawnKind`] on an existing entity.
+///
+/// Lights and empties carry only plain reflected data (which round-trips through scene
+/// files), so they're handled by [`spawn_kind`]; this helper builds the parts that *can't*
+/// round-trip — procedural mesh/material handles and the sprite — and so is reused by the
+/// scene loader to rebuild visuals after deserializing an entity's `SpawnedAs`.
+pub fn apply_kind_visuals(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    kind: SpawnKind,
+    entity: Entity,
+) {
+    let base = Color::srgb(0.8, 0.75, 0.7);
+    let mut e = commands.entity(entity);
+    match kind {
+        SpawnKind::Cube => {
+            e.insert((
+                Mesh3d(meshes.add(Cuboid::default())),
+                MeshMaterial3d(materials.add(base)),
+            ));
+        }
+        SpawnKind::Sphere => {
+            e.insert((
+                Mesh3d(meshes.add(Sphere::new(0.5))),
+                MeshMaterial3d(materials.add(base)),
+            ));
+        }
+        SpawnKind::Plane => {
+            e.insert((
+                Mesh3d(meshes.add(Cuboid::new(5.0, 0.02, 5.0))),
+                MeshMaterial3d(materials.add(base)),
+            ));
         }
         SpawnKind::Sprite => {
-            entity.insert(Sprite::from_color(
+            e.insert(Sprite::from_color(
                 Color::srgb(0.4, 0.6, 0.9),
                 Vec2::splat(100.0),
             ));
         }
-        SpawnKind::Empty => {
-            entity.insert(Visibility::default());
-        }
+        SpawnKind::PointLight | SpawnKind::DirectionalLight | SpawnKind::Empty => {}
     }
-    entity.id()
 }

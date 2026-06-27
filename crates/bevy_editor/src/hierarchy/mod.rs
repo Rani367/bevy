@@ -64,7 +64,7 @@ impl Default for HierarchyRow {
 
 /// On a row's disclosure (collapse/expand) toggle; points at the scene entity.
 #[derive(Component, Debug, Clone, Copy)]
-struct RowDisclosure(Entity);
+pub(crate) struct RowDisclosure(pub(crate) Entity);
 
 impl Default for RowDisclosure {
     fn default() -> Self {
@@ -74,11 +74,11 @@ impl Default for RowDisclosure {
 
 /// Marks the inline rename text input.
 #[derive(Component, Default, Clone, Copy)]
-struct RenameInput;
+pub(crate) struct RenameInput;
 
 /// Marks the full-screen backdrop behind a context menu (click it to dismiss).
 #[derive(Component, Default, Clone, Copy)]
-struct ContextMenuBackdrop;
+pub(crate) struct ContextMenuBackdrop;
 
 /// Request to close any open context menu.
 #[derive(Event, Clone, Copy)]
@@ -90,11 +90,11 @@ struct HierarchyDirty(bool);
 
 /// Scene entities whose children are currently collapsed in the tree.
 #[derive(Resource, Default)]
-struct CollapsedNodes(HashSet<Entity>);
+pub(crate) struct CollapsedNodes(pub(crate) HashSet<Entity>);
 
 /// The scene entity currently being renamed inline, if any.
 #[derive(Resource, Default)]
-struct Renaming(Option<Entity>);
+pub(crate) struct Renaming(pub(crate) Option<Entity>);
 
 /// Installs the hierarchy panel systems and action observers.
 pub struct HierarchyPlugin;
@@ -673,7 +673,7 @@ fn is_descendant(candidate: Entity, root: Entity, children_q: &Query<&Children>)
 
 /// Drop one row onto another → reparent the dragged entity under the target.
 fn on_row_drag_drop(
-    drop: On<Pointer<DragDrop>>,
+    mut drop: On<Pointer<DragDrop>>,
     rows: Query<&HierarchyRow>,
     mut commands: Commands,
 ) {
@@ -681,8 +681,15 @@ fn on_row_drag_drop(
         return;
     };
     if target.0 == dragged.0 {
+        // Still stop a no-op self-drop from bubbling to the content node (which would
+        // unparent it).
+        drop.propagate(false);
         return;
     }
+    // `Pointer<DragDrop>` auto-propagates up the UI tree. Stop it here so the drop doesn't
+    // also reach the panel's `HierarchyContent` node, whose handler would immediately
+    // unparent the entity we just reparented.
+    drop.propagate(false);
     commands.trigger(ReparentRequest {
         child: dragged.0,
         new_parent: Some(target.0),
