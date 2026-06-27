@@ -95,7 +95,7 @@ impl PluginGroup for EditorPlugins {
             .add(build_export::BuildExportPlugin)
             // Multi-scene tabs.
             .add(tabs::TabsPlugin)
-            // Remote (BRP) read-only inspection scaffold.
+            // Remote (BRP) inspection + editing over the Bevy Remote Protocol.
             .add(remote::RemotePlugin)
     }
 }

@@ -4,9 +4,8 @@
 //! (default `127.0.0.1:15702`) and drives it over raw HTTP JSON-RPC on worker threads: it
 //! queries the remote world (reporting its entities) and can **edit** it — spawn an entity,
 //! despawn one, and mutate a component field (`world.spawn_entity` / `world.despawn_entity` /
-//! `world.mutate_components`). The low-level [`brp_request`] helper is public so tools (and the
-//! `editor_verify_remote` harness) can issue any BRP method. The local editing path is
-//! unaffected.
+//! `world.mutate_components`). The low-level [`brp_request`] helper is public so external
+//! tooling can issue any BRP method. The local editing path is unaffected.
 
 use alloc::sync::Arc;
 use std::io::{Read, Write};

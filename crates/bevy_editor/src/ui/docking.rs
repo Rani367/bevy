@@ -15,6 +15,7 @@ use bevy_picking::events::{Drag, Pointer};
 use bevy_platform::collections::HashMap;
 use bevy_ui::{px, Display, GlobalZIndex, Node, PositionType, Val};
 use bevy_ui_widgets::Activate;
+use bevy_window::{PrimaryWindow, Window};
 
 /// The dockable side panels (the viewport is the fixed center).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -102,8 +103,12 @@ impl DockState {
 
 /// Z-index for a floating panel (above the docked panels / viewport).
 const FLOAT_Z: i32 = 50;
-/// Default width a panel floats at.
-const FLOAT_SIZE: Vec2 = Vec2::new(80.0, 80.0);
+/// Where a panel first appears when torn off (top-left, window pixels).
+const FLOAT_ORIGIN: Vec2 = Vec2::new(80.0, 80.0);
+/// Height a torn-off panel floats at, so it reads as a window rather than a full-height strip.
+const FLOAT_HEIGHT: f32 = 320.0;
+/// Keep at least this many pixels of a floating panel on-screen on each axis.
+const KEEP_VISIBLE: f32 = 120.0;
 
 /// Installs the docking systems + header-control observers.
 pub struct DockingPlugin;
@@ -141,7 +146,7 @@ fn on_float_button(
         d.floating = if d.floating.is_some() {
             None
         } else {
-            Some(FLOAT_SIZE)
+            Some(FLOAT_ORIGIN)
         };
     }
 }
@@ -155,19 +160,37 @@ fn on_header_drag(
     if let Ok(header) = headers.get(drag.entity) {
         let delta = Vec2::new(drag.delta.x, drag.delta.y);
         let d = dock.entry(header.0);
-        d.floating = Some(d.floating.unwrap_or(FLOAT_SIZE) + delta);
+        d.floating = Some(d.floating.unwrap_or(FLOAT_ORIGIN) + delta);
     }
 }
 
+/// Clamp a floating panel's top-left so at least [`KEEP_VISIBLE`] px stay within `window`.
+fn clamp_float_pos(pos: Vec2, window: Vec2) -> Vec2 {
+    Vec2::new(
+        pos.x.clamp(0.0, (window.x - KEEP_VISIBLE).max(0.0)),
+        pos.y.clamp(0.0, (window.y - KEEP_VISIBLE).max(0.0)),
+    )
+}
+
 /// Reflect [`DockState`] onto the panel nodes whenever it changes.
+///
+/// Gated on `DockState` changes (not the window), so resizing the window while a panel floats
+/// won't re-clamp until that panel is next interacted with — acceptable, and keeps this off the
+/// per-frame relayout path.
 fn apply_dock_layout(
     dock: Res<DockState>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut contents: Query<(&PanelContent, &mut Node), Without<Panel>>,
     mut panels: Query<(&Panel, &mut Node, &mut GlobalZIndex), Without<PanelContent>>,
 ) {
     if !dock.is_changed() {
         return;
     }
+    // No window (briefly, at startup/shutdown) → an infinite extent makes the clamp a no-op.
+    let win = windows
+        .single()
+        .map(|w| Vec2::new(w.width(), w.height()))
+        .unwrap_or(Vec2::splat(f32::INFINITY));
     for (content, mut node) in &mut contents {
         node.display = if dock.get(content.0).collapsed {
             Display::None
@@ -178,17 +201,49 @@ fn apply_dock_layout(
     for (panel, mut node, mut z) in &mut panels {
         match dock.get(panel.0).floating {
             Some(pos) => {
+                let pos = clamp_float_pos(pos, win);
                 node.position_type = PositionType::Absolute;
-                node.left = px(pos.x.max(0.0));
-                node.top = px(pos.y.max(0.0));
+                node.left = px(pos.x);
+                node.top = px(pos.y);
+                // Give the panel a window-like height; width is left to the splitter.
+                node.height = px(FLOAT_HEIGHT);
                 z.0 = FLOAT_Z;
             }
             None => {
                 node.position_type = PositionType::Relative;
                 node.left = Val::Auto;
                 node.top = Val::Auto;
+                // Restore the panel's normal stretch-to-fill height.
+                node.height = Val::Auto;
                 z.0 = 0;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_float_pos_keeps_panel_on_screen() {
+        let window = Vec2::new(1280.0, 720.0);
+        // In-bounds is untouched.
+        assert_eq!(
+            clamp_float_pos(Vec2::new(200.0, 150.0), window),
+            Vec2::new(200.0, 150.0)
+        );
+        // Dragged far off the bottom-right → pinned so KEEP_VISIBLE px remain visible.
+        assert_eq!(
+            clamp_float_pos(Vec2::new(9999.0, 9999.0), window),
+            Vec2::new(1280.0 - KEEP_VISIBLE, 720.0 - KEEP_VISIBLE),
+        );
+        // Negative (off the top-left) clamps to the origin.
+        assert_eq!(clamp_float_pos(Vec2::new(-50.0, -10.0), window), Vec2::ZERO);
+        // A window smaller than KEEP_VISIBLE still clamps to a valid (0,0).
+        assert_eq!(
+            clamp_float_pos(Vec2::new(40.0, 40.0), Vec2::new(80.0, 80.0)),
+            Vec2::ZERO
+        );
     }
 }
