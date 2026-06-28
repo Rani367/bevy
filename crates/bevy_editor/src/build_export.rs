@@ -20,6 +20,7 @@ use bevy_ui::{px, Display, FlexDirection, JustifyContent, Node};
 use bevy_ui_widgets::Activate;
 
 use crate::actions::SceneIoRequest;
+use crate::project::ActiveProject;
 use crate::ui::style::dialog_frame;
 use crate::ui::{CloseOverlay, ShowToast};
 
@@ -63,10 +64,12 @@ fn on_export_scene(_: On<ExportSceneRequest>, mut commands: Commands) {
     commands.trigger(SceneIoRequest::Save);
 }
 
-/// Kick off `cargo build --release` on a worker thread (unless one is already running).
+/// Kick off `cargo build` (per the project's profile) on a worker thread for the active
+/// project, unless one is already running.
 fn on_build_project(
     _: On<BuildProjectRequest>,
     mut status: ResMut<BuildStatus>,
+    project: Res<ActiveProject>,
     mut commands: Commands,
 ) {
     if status.running {
@@ -74,10 +77,23 @@ fn on_build_project(
     }
     status.running = true;
     let slot = status.result.clone();
+    let root = project.root.clone();
+    let assets = project.assets_dir();
+    let profile = project.config.build.profile;
+    let target = project.config.build.target.clone();
     std::thread::spawn(move || {
         // `--message-format=json` so we can find the produced binary's path.
+        let mut args = vec!["build".to_string(), "--message-format=json".to_string()];
+        if let Some(flag) = profile.cargo_flag() {
+            args.push(flag.to_string());
+        }
+        if let Some(triple) = &target {
+            args.push("--target".to_string());
+            args.push(triple.clone());
+        }
         let output = Command::new("cargo")
-            .args(["build", "--release", "--message-format=json"])
+            .args(&args)
+            .current_dir(&root)
             .output();
         let result = match output {
             Ok(out) if out.status.success() => {
@@ -85,8 +101,8 @@ fn on_build_project(
                 match last_executable(&stdout) {
                     Some(exe) => {
                         let exe = PathBuf::from(exe);
-                        let out_dir = dist_dir(&exe);
-                        match package_dist(&exe, Path::new("assets"), &out_dir) {
+                        let out_dir = root.join(dist_dir(&exe));
+                        match package_dist(&exe, &assets, &out_dir) {
                             Ok(dir) => BuildOutput {
                                 success: true,
                                 summary: format!("Packaged to {}", dir.display()),
@@ -125,7 +141,7 @@ fn on_build_project(
         *slot.lock().unwrap() = Some(result);
     });
     commands.spawn_scene(status_overlay(
-        "Building + packaging project (cargo build --release)…",
+        "Building + packaging project (cargo build)…",
     ));
 }
 

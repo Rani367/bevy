@@ -162,6 +162,85 @@ A release-grade visual overhaul, all built on the existing `bevy_feathers` primi
 
 ---
 
+# Godot-parity expansion (in progress)
+
+The sections below track the work to grow this from a scene editor into a full Godot-style engine
+("make / run / code a game from scratch"). See the approved plan for the full roadmap.
+
+## 16. Project model + scaffolding — ✅
+`src/project.rs`. An editor **project** is a directory with a `project.bevy.ron` config (name,
+default scene, recent scenes, build profile, input-action stubs). [`ActiveProject`] is the single
+source of truth for where files live — scene I/O, the asset browser, cargo build, and the code
+editor all resolve against its root (default: the working dir). **New / Open / Recent Project**
+flows (Project menu + command palette), and **New-Project scaffolding** writes a runnable Bevy
+cargo project from scratch (`Cargo.toml`, `src/main.rs`, `assets/scenes/`, `.gitignore`,
+`project.bevy.ron`). Recent projects persist to `~/.bevy_editor/recent_projects.ron`. Unit-tested:
+config RON round-trip, recent-scene de-dup, crate-name sanitization, scaffold output, recents cap.
+
+## 17. Tabbed bottom dock + workspace persistence — ✅
+`src/ui/bottom_dock.rs`. Replaces the single console strip with a **tabbed bottom dock** hosting
+the **Console** and build **Output** tabs (extensible: add a `BottomTab` variant + a
+`BottomTabContent` node). Open/active state is a serializable workspace persisted to
+`~/.bevy_editor/layout.ron`. The console was migrated in as a tab.
+
+## 18. Code the game in Rust — ✅
+`src/code.rs`. The center area switches (toolbar `</>`, palette) between the scene viewport and a
+**Rust code editor** ([`MainView`]) that browses the active project's `src/**.rs`, edits a file in
+a multi-line area, and saves it. **Cargo integration**: `cargo check` streams **clickable
+diagnostics** (file:line → opens + the editor) into the Output dock; **Run** launches the game via
+`cargo run` as a child process whose stdout/stderr is captured into Output; **Stop** kills it.
+Runs on the worker-thread + poll pattern, scoped to the active project's profile/root. Unit-tested:
+recursive `.rs` listing, cargo-JSON diagnostic parsing (spans + level filtering), main-view toggle.
+*(Follow-ups: Rust syntax highlighting, rust-analyzer LSP, dylib hot-reload — see TODO.)*
+
+## 19. Inspector grouping + color swatch — ✅ (picker popup pending)
+`src/inspector/mod.rs`. `Vec2`/`Vec3`/`Vec4`/`Quat` now render as **one labeled row** with colored
+axis inputs side-by-side (e.g. `Translation: [X][Y][Z]`) instead of stacked unlabeled rows;
+`Color` shows a **preview swatch** above its editable R/G/B/A channels. Unit-tested vector
+detection. *(Pending: the interactive color-picker popup and a generic per-`TypeId`
+`PropertyEditorRegistry` — see TODO.)*
+
+## 20. Project settings + input map — ✅
+`src/project.rs`. A **Project Settings** dialog edits the name, default scene, build profile
+(Debug/Release), and cross-compile **target triple**; an **Input Map** dialog adds/removes named
+action→key bindings. Both persist to `project.bevy.ron` (Project menu + palette).
+
+## 21. Asset import dock — ✅
+`src/scene_io.rs`. The Assets panel is now a **recursive folder tree** of the project's `assets/`
+(folders first, file-type icons, inline image thumbnails) with an **Import Asset** button; scene
+files instantiate on click.
+
+## 22. Debugger/Stats + Animation panels — ✅
+`src/diagnostics.rs`, `src/animation.rs`. A **Stats** dock tab shows live FPS / frame time /
+entity + scene-entity counts / selection / run-state with a **Step Frame** button (single-step
+game logic while paused). An **Animation** tab drives the selection's `AnimationPlayer`
+(pause/resume/restart all clips).
+
+## 23. Material editor + shaders + UI editor — ✅
+`src/material.rs`, `src/code.rs`, `src/ui_edit.rs`. A **Material** dock tab edits the selection's
+`StandardMaterial` (base-color R/G/B/A, metallic, roughness) live via sliders. The code editor's
+file list also lists **`.wgsl`** shaders for editing. The Entity menu spawns **UI nodes** (Node /
+Text) that preview *inside the viewport* (bound to the scene camera) and serialize with the scene.
+
+## 24. First-party physics / particles / tilemap — ✅
+`src/gameplay.rs`. Dependency-free, in-tree engine features (mature third-party crates target
+released Bevy, not this fork): a **physics** integrator (`RigidBody` velocity + gravity + ground
+bounce), a **particle** emitter (`ParticleEmitter`, transient particles cleaned up on Stop), and a
+**tilemap** (`Tilemap` grid of tile sprites, rebuilt on change). All are reflected components
+(inspector-editable, serialized) and spawnable from the **GameObject** menu / palette. Physics +
+particles run only in play mode.
+
+## 25. Audio mixer + multi-target export — ✅
+`src/audio.rs`, `src/build_export.rs`. An **Audio** dock tab scales Bevy's `GlobalVolume` with a
+master-volume slider. **Build Project** honors the project's profile **and target triple**
+(`cargo build [--release] [--target <triple>]`) for multi-platform export.
+
+**Deferred polish** (documented in TODO): inline Rust **syntax highlighting** (the plain-text
+widget can't style spans without a custom overlay), a game-UI **theme-token editor**, and a
+**localization** string-table editor.
+
+---
+
 ## How to re-verify
 ```sh
 cargo fmt --check

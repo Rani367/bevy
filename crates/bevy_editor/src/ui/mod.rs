@@ -2,6 +2,7 @@
 //! Viewport / Inspector / Asset panels) built with `bevy_feathers` and the `bsn!`
 //! scene macro, plus the custom splitter widget Feathers doesn't provide.
 
+pub mod bottom_dock;
 pub mod command_palette;
 pub mod console;
 pub mod docking;
@@ -14,6 +15,7 @@ pub mod style;
 pub mod theme_switch;
 pub mod toast;
 
+pub use bottom_dock::{BottomDock, BottomTab, OutputContent, ShowBottomTab};
 pub use docking::{DockState, Panel, PanelContent, PanelId};
 pub use splitter::{ResizeSide, Splitter};
 pub use toast::{ShowToast, ToastLevel};
@@ -143,6 +145,7 @@ impl Plugin for EditorUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             docking::DockingPlugin,
+            bottom_dock::BottomDockPlugin,
             status_bar::StatusBarPlugin,
             theme_switch::ThemeSwitchPlugin,
             shortcuts::ShortcutsPlugin,

@@ -25,6 +25,10 @@ pub enum SpawnKind {
     Sprite,
     /// An empty entity (just a `Transform` + `Name`), useful as a grouping node.
     Empty,
+    /// A UI panel node (a colored `Node`), previewed in the viewport.
+    UiNode,
+    /// A UI text node.
+    UiText,
 }
 
 /// Request to spawn a new scene entity. Handled by the hierarchy plugin, which owns

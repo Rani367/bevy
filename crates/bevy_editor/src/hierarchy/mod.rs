@@ -244,6 +244,8 @@ fn kind_icon(kind: Option<SpawnKind>) -> &'static str {
         Some(SpawnKind::PointLight) => icons::LIGHT,
         Some(SpawnKind::DirectionalLight) => icons::DIR_LIGHT,
         Some(SpawnKind::Sprite) => icons::SPRITE,
+        Some(SpawnKind::UiNode) => icons::GRID,
+        Some(SpawnKind::UiText) => icons::LIST,
         Some(SpawnKind::Empty) | None => icons::EMPTY,
     }
 }

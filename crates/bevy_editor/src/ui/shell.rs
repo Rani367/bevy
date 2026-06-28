@@ -19,8 +19,8 @@ use bevy_scene::prelude::*;
 use bevy_state::state::{NextState, State};
 use bevy_ui::widget::Text;
 use bevy_ui::{
-    percent, px, AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, GlobalZIndex,
-    IsDefaultUiCamera, Node, Overflow, UiRect,
+    percent, px, AlignItems, AlignSelf, Display, FlexDirection, GlobalZIndex, IsDefaultUiCamera,
+    Node, Overflow, UiRect,
 };
 use bevy_ui_widgets::{Activate, ScrollArea};
 use bevy_window::SystemCursorIcon;
@@ -30,11 +30,17 @@ use crate::actions::{
     SceneIoRequest, SpawnKind, SpawnRequest,
 };
 use crate::build_export::{BuildProjectRequest, ExportSceneRequest};
+use crate::code::{code_panel, CargoCheckRequest, MainView, MainViewNode, RunGameRequest};
 use crate::markers::EditorEntity;
+use crate::project::{
+    OpenInputMap, OpenNewProjectDialog, OpenOpenProjectDialog, OpenProjectSettings,
+    SaveProjectRequest,
+};
 use crate::remote::OpenConnectDialog;
 use crate::state::{EditorState, GizmoMode, GizmoSnap, ViewportMode};
 use crate::ui::icons;
 use crate::ui::style::{etokens, sizes, space};
+use crate::ui::{BottomTab, ShowBottomTab};
 use crate::undo::{RequestRedo, RequestUndo};
 
 use super::docking::{
@@ -57,6 +63,8 @@ pub enum ToolbarToggle {
     /// Active when grid snapping is enabled (default; an inert placeholder for `Default`).
     #[default]
     Snap,
+    /// Active when the center area shows the code editor.
+    CodeView,
 }
 
 /// Light up toolbar buttons whose mode/state is currently active. Runs only when one of the
@@ -66,9 +74,15 @@ pub fn sync_toolbar_active(
     run_state: Res<State<EditorState>>,
     vmode: Res<ViewportMode>,
     snap: Res<GizmoSnap>,
+    main_view: Res<MainView>,
     mut buttons: Query<(&ToolbarToggle, &mut ButtonVariant)>,
 ) {
-    if !(gizmo.is_changed() || run_state.is_changed() || vmode.is_changed() || snap.is_changed()) {
+    if !(gizmo.is_changed()
+        || run_state.is_changed()
+        || vmode.is_changed()
+        || snap.is_changed()
+        || main_view.is_changed())
+    {
         return;
     }
     for (toggle, mut variant) in buttons.iter_mut() {
@@ -77,6 +91,7 @@ pub fn sync_toolbar_active(
             ToolbarToggle::Gizmo(m) => *gizmo == *m,
             ToolbarToggle::TwoD => *vmode == ViewportMode::TwoD,
             ToolbarToggle::Snap => snap.enabled,
+            ToolbarToggle::CodeView => *main_view == MainView::Code,
         };
         let want = if active {
             ButtonVariant::Primary
@@ -113,7 +128,7 @@ fn editor_root() -> impl Scene {
             tab_bar(),
             body_row(),
             asset_row(),
-            crate::ui::console::console_panel(),
+            crate::ui::bottom_dock::bottom_dock_panel(),
             crate::ui::status_bar::status_bar(),
         ]
     }
@@ -137,11 +152,38 @@ fn menu_bar() -> impl Scene {
         ThemeBackgroundColor(tokens::WINDOW_BG)
         ThemeBorderColor(etokens::PANEL_BORDER)
         Children [
+            project_menu(),
             file_menu(),
             edit_menu(),
             entity_menu(),
+            gameobject_menu(),
             view_menu(),
             build_menu(),
+        ]
+    }
+}
+
+fn project_menu() -> impl Scene {
+    bsn! {
+        @FeathersMenu
+        Children [
+            (@FeathersMenuButton {
+                @caption: bsn! { Text("Project") ThemedText },
+                @arrow: false,
+            }),
+            (@FeathersMenuPopup Children [
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::FILE_PLUS, "New Project")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenNewProjectDialog); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::FOLDER_OPEN, "Open Project")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenOpenProjectDialog); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SAVE, "Save Project Settings")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(SaveProjectRequest); })),
+                @FeathersMenuDivider,
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SETTINGS, "Project Settings...")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenProjectSettings); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SLIDERS, "Input Map...")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenInputMap); })),
+            ]),
         ]
     }
 }
@@ -241,6 +283,31 @@ fn entity_menu() -> impl Scene {
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(SpawnRequest(SpawnKind::Sprite)); })),
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::EMPTY, "Empty")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(SpawnRequest(SpawnKind::Empty)); })),
+                @FeathersMenuDivider,
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SQUARE, "UI Node")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(SpawnRequest(SpawnKind::UiNode)); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::LIST, "UI Text")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(SpawnRequest(SpawnKind::UiText)); })),
+            ]),
+        ]
+    }
+}
+
+fn gameobject_menu() -> impl Scene {
+    bsn! {
+        @FeathersMenu
+        Children [
+            (@FeathersMenuButton {
+                @caption: bsn! { Text("GameObject") ThemedText },
+                @arrow: false,
+            }),
+            (@FeathersMenuPopup Children [
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::CUBE, "Physics Cube")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::gameplay::SpawnPhysicsCube); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SUCCESS, "Particle Emitter")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::gameplay::SpawnParticleEmitter); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::GRID, "Tilemap")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::gameplay::SpawnTilemap); })),
             ]),
         ]
     }
@@ -266,6 +333,15 @@ fn view_menu() -> impl Scene {
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::ui::ToggleConsole); })),
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::COMMAND, "Command Palette")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::ui::OpenCommandPalette); })),
+                @FeathersMenuDivider,
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SLIDERS, "Stats Panel")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Stats)); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::PLAY_MODE, "Animation Panel")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Animation)); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SPHERE, "Material Panel")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Material)); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::BUILD, "Output Panel")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Output)); })),
             ]),
         ]
     }
@@ -280,6 +356,11 @@ fn build_menu() -> impl Scene {
                 @arrow: false,
             }),
             (@FeathersMenuPopup Children [
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::PLAY, "Run Game")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(RunGameRequest); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::CHECK, "Check (cargo check)")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(CargoCheckRequest); })),
+                @FeathersMenuDivider,
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::EXPORT, "Export Scene")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(ExportSceneRequest); })),
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::BUILD, "Build Project")) } }
@@ -353,6 +434,16 @@ fn toolbar() -> impl Scene {
             ]),
             pane_header_divider(),
             (toolbar_group() Children [
+                (@FeathersToolButton { @caption: bsn! { (icon(icons::CODE)) } }
+                    template_value(ToolbarToggle::CodeView)
+                    on(|_: On<Activate>, mut v: ResMut<MainView>| { v.toggle(); })),
+                (@FeathersToolButton { @variant: ButtonVariant::Primary, @caption: bsn! { (icon(icons::PLAY)) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(RunGameRequest); })),
+                (@FeathersToolButton { @caption: bsn! { (icon(icons::CHECK)) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(CargoCheckRequest); })),
+            ]),
+            pane_header_divider(),
+            (toolbar_group() Children [
                 (@FeathersToolButton { @caption: bsn! { (icon(icons::UNDO)) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(RequestUndo); })),
                 (@FeathersToolButton { @caption: bsn! { (icon(icons::REDO)) } }
@@ -399,9 +490,26 @@ fn body_row() -> impl Scene {
         Children [
             hierarchy_panel(),
             splitter_v(ResizeSide::Prev),
-            viewport_panel(),
+            center_area(),
             splitter_v(ResizeSide::Next),
             inspector_panel(),
+        ]
+    }
+}
+
+/// The center column: the scene viewport and the code editor stacked, with only the one
+/// matching the current [`MainView`] shown.
+fn center_area() -> impl Scene {
+    bsn! {
+        Node {
+            flex_grow: 1.0,
+            min_width: px(150),
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+        }
+        Children [
+            viewport_panel(),
+            code_panel(),
         ]
     }
 }
@@ -445,6 +553,7 @@ fn viewport_panel() -> impl Scene {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
         }
+        template_value(MainViewNode(MainView::Scene))
         Children [
             panel_header(icons::CUBE, "Viewport"),
             (
@@ -508,12 +617,10 @@ fn asset_row() -> impl Scene {
                     flex_grow: 1.0,
                     min_height: px(0),
                     display: Display::Flex,
-                    flex_direction: FlexDirection::Row,
-                    flex_wrap: FlexWrap::Wrap,
-                    padding: space::LG,
-                    column_gap: space::LG,
-                    row_gap: space::LG,
-                    align_items: AlignItems::Start,
+                    flex_direction: FlexDirection::Column,
+                    padding: space::SM,
+                    row_gap: px(1),
+                    align_items: AlignItems::Stretch,
                     overflow: Overflow::scroll_y(),
                 }
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)

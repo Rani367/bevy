@@ -10,10 +10,7 @@ use std::sync::Mutex;
 use bevy_app::{App, Plugin, PropagateOver, Update};
 use bevy_ecs::prelude::*;
 use bevy_feathers::constants::{fonts, size};
-use bevy_feathers::display::{icon, label_small};
-use bevy_feathers::theme::{
-    ThemeBackgroundColor, ThemeBorderColor, ThemeTextColor, ThemeToken, ThemedText,
-};
+use bevy_feathers::theme::{ThemeBackgroundColor, ThemeTextColor, ThemeToken};
 use bevy_feathers::tokens;
 use bevy_log::tracing::field::{Field, Visit};
 use bevy_log::tracing::{Event, Level, Subscriber};
@@ -26,12 +23,11 @@ use bevy_scene::prelude::*;
 use bevy_scene::EntityScene;
 use bevy_text::{FontSourceTemplate, FontWeight, TextFont};
 use bevy_ui::widget::Text;
-use bevy_ui::{px, AlignItems, Display, FlexDirection, Node, Overflow, UiRect};
+use bevy_ui::{px, Display, FlexDirection, Node, Overflow, UiRect};
 use bevy_ui_widgets::ScrollArea;
 
-use crate::markers::EditorEntity;
-use crate::ui::style::{etokens, sizes};
-use crate::ui::{icons, ToggleConsole};
+use crate::ui::bottom_dock::{BottomDock, BottomTab};
+use crate::ui::style::etokens;
 
 /// Severity of a captured log line.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,18 +74,13 @@ struct ConsoleLine {
 #[derive(Resource, Clone)]
 struct ConsoleBuffer(Arc<Mutex<VecDeque<ConsoleLine>>>);
 
-/// Marks the console panel root (toggled visible/hidden).
-#[derive(Component, Default, Clone, Copy)]
-struct ConsolePanel;
-
 /// Marks the scrollable container the log rows are spawned into.
 #[derive(Component, Default, Clone, Copy)]
 struct ConsoleContent;
 
-/// Whether the console is currently shown, plus the last-rendered line count.
+/// Tracks the last-rendered line count so the console only rebuilds when new lines arrive.
 #[derive(Resource, Default)]
 struct ConsoleState {
-    visible: bool,
     rendered: usize,
 }
 
@@ -147,65 +138,23 @@ pub fn editor_console_layer(app: &mut App) -> Option<BoxedLayer> {
 // Panel
 // ---------------------------------------------------------------------------
 
-/// The console panel, hidden by default. Placed in the shell above the status bar.
-pub fn console_panel() -> impl Scene {
+/// The console's scrollable body — the log rows container. Hosted by the bottom dock as its
+/// Console tab (the dock owns visibility; this is just the content).
+pub fn console_body() -> impl Scene {
     bsn! {
         Node {
-            display: Display::None,
+            flex_grow: 1.0,
+            min_height: px(0),
+            display: Display::Flex,
             flex_direction: FlexDirection::Column,
-            height: px(200),
-            border: UiRect::top(px(1)),
+            padding: UiRect::axes(px(8), px(4)),
+            row_gap: px(1),
+            overflow: Overflow::scroll_y(),
         }
-        EditorEntity
-        ConsolePanel
-        ThemeBorderColor(etokens::PANEL_BORDER)
-        Children [
-            (
-                Node {
-                    min_height: sizes::PANEL_HEADER_H,
-                    padding: UiRect::horizontal(px(8)),
-                    align_items: AlignItems::Center,
-                    column_gap: px(6),
-                    border: UiRect::bottom(px(1)),
-                }
-                ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-                ThemeBorderColor(etokens::PANEL_BORDER)
-                Children [
-                    (icon(icons::TERMINAL) ThemedText),
-                    label_small("Console"),
-                ]
-            ),
-            (
-                Node {
-                    flex_grow: 1.0,
-                    min_height: px(0),
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::axes(px(8), px(4)),
-                    row_gap: px(1),
-                    overflow: Overflow::scroll_y(),
-                }
-                ThemeBackgroundColor(tokens::PANE_BODY_BG)
-                ScrollArea
-                ConsoleContent
-                Pickable::IGNORE
-            ),
-        ]
-    }
-}
-
-fn on_toggle_console(
-    _: On<ToggleConsole>,
-    mut state: ResMut<ConsoleState>,
-    mut panels: Query<&mut Node, With<ConsolePanel>>,
-) {
-    state.visible = !state.visible;
-    for mut node in panels.iter_mut() {
-        node.display = if state.visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
+        ThemeBackgroundColor(tokens::PANE_BODY_BG)
+        ScrollArea
+        ConsoleContent
+        Pickable::IGNORE
     }
 }
 
@@ -231,6 +180,7 @@ fn console_line_row(line: &ConsoleLine) -> impl Scene {
 /// Rebuild the console rows when it's visible and new lines have arrived.
 fn update_console(
     buffer: Option<Res<ConsoleBuffer>>,
+    dock: Res<BottomDock>,
     mut state: ResMut<ConsoleState>,
     content: Query<Entity, With<ConsoleContent>>,
     mut commands: Commands,
@@ -238,7 +188,7 @@ fn update_console(
     let Some(buffer) = buffer else {
         return;
     };
-    if !state.visible {
+    if !(dock.open && dock.active == BottomTab::Console) {
         return;
     }
     let Ok(container) = content.single() else {
@@ -270,7 +220,6 @@ pub struct ConsolePlugin;
 impl Plugin for ConsolePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ConsoleState>()
-            .add_systems(Update, update_console)
-            .add_observer(on_toggle_console);
+            .add_systems(Update, update_console);
     }
 }

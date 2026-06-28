@@ -23,6 +23,12 @@ use crate::actions::{
     SpawnRequest,
 };
 use crate::build_export::{BuildProjectRequest, ExportSceneRequest};
+use crate::code::{CargoCheckRequest, MainView, RunGameRequest, StopGameRequest};
+use crate::gameplay::{SpawnParticleEmitter, SpawnPhysicsCube, SpawnTilemap};
+use crate::project::{
+    OpenInputMap, OpenNewProjectDialog, OpenOpenProjectDialog, OpenProjectSettings,
+    SaveProjectRequest,
+};
 use crate::remote::OpenConnectDialog;
 use crate::state::{EditorState, GizmoMode, GizmoSnap, ViewportMode};
 use crate::ui::style::dialog_frame;
@@ -54,6 +60,18 @@ enum PaletteAction {
     Export,
     ToggleTheme,
     ToggleConsole,
+    NewProject,
+    OpenProject,
+    SaveProject,
+    ProjectSettings,
+    InputMap,
+    RunGame,
+    StopGame,
+    CargoCheck,
+    ToggleCodeView,
+    PhysicsCube,
+    ParticleEmitter,
+    Tilemap,
 }
 
 /// One palette entry: a label, an icon, and the action to run.
@@ -89,6 +107,15 @@ impl Default for PaletteItem {
 fn build_registry(mut commands: Commands) {
     use PaletteAction::*;
     let cmds = vec![
+        ("New Project...", icons::FILE_PLUS, NewProject),
+        ("Open Project...", icons::FOLDER_OPEN, OpenProject),
+        ("Save Project Settings", icons::SAVE, SaveProject),
+        ("Project Settings...", icons::SETTINGS, ProjectSettings),
+        ("Input Map...", icons::SLIDERS, InputMap),
+        ("Run Game", icons::PLAY, RunGame),
+        ("Stop Game", icons::STOP, StopGame),
+        ("Check (cargo check)", icons::CHECK, CargoCheck),
+        ("Toggle Code Editor", icons::CODE, ToggleCodeView),
         ("Spawn Cube", icons::CUBE, Spawn(SpawnKind::Cube)),
         ("Spawn Sphere", icons::SPHERE, Spawn(SpawnKind::Sphere)),
         ("Spawn Plane", icons::SQUARE, Spawn(SpawnKind::Plane)),
@@ -104,6 +131,11 @@ fn build_registry(mut commands: Commands) {
         ),
         ("Spawn Sprite (2D)", icons::SPRITE, Spawn(SpawnKind::Sprite)),
         ("Spawn Empty", icons::EMPTY, Spawn(SpawnKind::Empty)),
+        ("Spawn UI Node", icons::SQUARE, Spawn(SpawnKind::UiNode)),
+        ("Spawn UI Text", icons::LIST, Spawn(SpawnKind::UiText)),
+        ("Spawn Physics Cube", icons::CUBE, PhysicsCube),
+        ("Spawn Particle Emitter", icons::SUCCESS, ParticleEmitter),
+        ("Spawn Tilemap", icons::GRID, Tilemap),
         ("Move Tool", icons::GIZMO_MOVE, Gizmo(GizmoMode::Translate)),
         ("Rotate Tool", icons::GIZMO_ROTATE, Gizmo(GizmoMode::Rotate)),
         ("Scale Tool", icons::GIZMO_SCALE, Gizmo(GizmoMode::Scale)),
@@ -216,6 +248,7 @@ fn on_palette_activate(
     mut vmode: ResMut<ViewportMode>,
     mut snap: ResMut<GizmoSnap>,
     mut state: ResMut<NextState<EditorState>>,
+    mut main_view: ResMut<MainView>,
     mut commands: Commands,
 ) {
     let Ok(item) = items.get(act.entity) else {
@@ -243,6 +276,18 @@ fn on_palette_activate(
         PaletteAction::Export => commands.trigger(ExportSceneRequest),
         PaletteAction::ToggleTheme => commands.trigger(ToggleTheme),
         PaletteAction::ToggleConsole => commands.trigger(ToggleConsole),
+        PaletteAction::NewProject => commands.trigger(OpenNewProjectDialog),
+        PaletteAction::OpenProject => commands.trigger(OpenOpenProjectDialog),
+        PaletteAction::SaveProject => commands.trigger(SaveProjectRequest),
+        PaletteAction::ProjectSettings => commands.trigger(OpenProjectSettings),
+        PaletteAction::InputMap => commands.trigger(OpenInputMap),
+        PaletteAction::RunGame => commands.trigger(RunGameRequest),
+        PaletteAction::StopGame => commands.trigger(StopGameRequest),
+        PaletteAction::CargoCheck => commands.trigger(CargoCheckRequest),
+        PaletteAction::ToggleCodeView => main_view.toggle(),
+        PaletteAction::PhysicsCube => commands.trigger(SpawnPhysicsCube),
+        PaletteAction::ParticleEmitter => commands.trigger(SpawnParticleEmitter),
+        PaletteAction::Tilemap => commands.trigger(SpawnTilemap),
     }
     commands.trigger(CloseOverlay);
 }

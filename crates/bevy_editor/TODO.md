@@ -1,5 +1,25 @@
 # bevy_editor — remaining work
 
+## Godot-parity expansion — status
+
+The editor has been expanded toward a full Godot-style engine. **Done** (see STATUS.md §16–25):
+project model + scaffolding, tabbed multi-dock + workspace persistence, in-editor Rust code
+editor + cargo check/run + clickable diagnostics, project settings + input map, recursive asset
+import dock, Stats/debugger + animation + material + audio dock panels, UI authoring with
+in-viewport preview, first-party physics/particles/tilemap, and multi-target export.
+
+**Deferred polish (high-value first):**
+1. Inline Rust **syntax highlighting** in the code editor — needs a custom colored overlay behind
+   the editable text (the `EditableText` widget is single-style); the cargo-diagnostics path
+   already gives clickable error navigation.
+2. Interactive **color-picker popup** (the swatch + R/G/B/A channels exist; see item 1 below).
+3. A generic per-`TypeId` **PropertyEditorRegistry** for the inspector.
+4. Game-UI **theme-token editor** and a **localization** string-table editor.
+5. 2D **tilemap painting** (the tilemap currently builds a static grid from its component).
+
+---
+
+
 A large UI overhaul is **done** (icon toolbar with active-state highlighting, themed dialogs via a
 shared `dialog_frame`, status bar, toast notifications, command palette, in-editor log console,
 light/dark themes, viewport selection outline + frame-to-selection, keyboard shortcuts,
@@ -10,14 +30,23 @@ add-component search, plus robustness/perf fixes — see `STATUS.md` §14–15).
 
 ```sh
 cargo clippy -p bevy_editor --all-targets   # must stay zero-warning
-cargo test  -p bevy_editor                  # 25 tests, must stay green
+cargo test  -p bevy_editor                  # 36 tests, must stay green
 cargo fmt   -p bevy_editor
 
 # Headless screenshot: renders the UI to an offscreen image, writes a PNG, then exits.
 EDITOR_SCREENSHOT=/tmp/shot.png cargo run --example editor --features bevy_editor
-# Capture a specific surface first (see examples/editor/editor.rs):
+# Capture a specific surface first (see examples/editor/editor.rs's capture_system):
 EDITOR_SCREENSHOT=/tmp/shot.png EDITOR_SHOT_OPEN=palette cargo run --example editor --features bevy_editor
-#   EDITOR_SHOT_OPEN ∈ {save, import, palette, console, theme, toast}
+#   EDITOR_SHOT_OPEN ∈ {
+#     save, import, palette, console, theme, toast,   # original surfaces
+#     newproject, openproject, settings,              # project flows
+#     code,                                           # Rust code editor (center view)
+#     stats, material, animation, audio,              # bottom-dock tabs
+#     uinode, physics,                                # spawn UI node / physics cube
+#   }
+# This env-driven capture path is the verification harness for future agents: add a new
+# `match` arm in `capture_system` (examples/editor/editor.rs) for any new surface, then diff
+# the PNG. Logic-heavy pieces are covered by the unit tests above.
 ```
 
 ### `bsn!` macro gotchas (you will hit these)
@@ -44,23 +73,19 @@ EDITOR_SCREENSHOT=/tmp/shot.png EDITOR_SHOT_OPEN=palette cargo run --example edi
 
 ---
 
-## 1. Inspector color picker (biggest gap)
-**Current:** `Color` components render as 4 raw number fields (R/G/B/A) — see
-`NumTy::{ColorR,ColorG,ColorB,ColorA}` and `number_field`/`collect_components` in
-`src/inspector/mod.rs` (grep `ColorR`). They have colored sigils but no swatch/picker.
-**Wanted:** a `FeathersColorSwatch` row (read/write `ColorSwatchValue(Color)`) that, on click,
-opens a small `dialog_frame` floating picker with a `FeathersColorPlane` (HueSaturation) + a hue
+## 1. Inspector color picker (swatch done; interactive popup pending)
+**Done:** `Color` now shows a preview **swatch** above its editable R/G/B/A channels
+(`color_swatch_field` in `src/inspector/mod.rs`, STATUS §19).
+**Still wanted:** make the swatch a `FeathersColorSwatch` that, on click, opens a small
+`dialog_frame` floating picker with a `FeathersColorPlane` (HueSaturation) + a hue
 `FeathersColorSlider` + an alpha slider, round-tripping through the existing `FieldBinding`
 reflect-write path.
 **Read:** `crates/bevy_feathers/src/controls/{color_swatch,color_plane,color_slider}.rs`.
 `ColorPlanePlugin`/`ColorSwatchPlugin` are already in `FeathersPlugins`.
 
-## 2. Inspector Vec3 grouping (usability gap)
-**Current:** axis fields are individually colored (red **X** / green **Y** / blue **Z** inputs),
-but translation / rotation / scale are stacked as separate rows with no group label — you can't
-tell which X/Y/Z belongs to which. See `axis_label`/`number_field` in `src/inspector/mod.rs`.
-**Wanted:** detect a Vec3/Quat component field in `collect_components` and emit ONE labeled row
-(`Translation: [X][Y][Z]`) instead of three unlabeled rows.
+## 2. Inspector Vec3 grouping — ✅ DONE
+`Vec2`/`Vec3`/`Vec4`/`Quat` now render as one labeled row with colored axis inputs
+(`vector_axes` + `vec_field` in `src/inspector/mod.rs`, STATUS §19).
 
 ## 3. Hierarchy search / filter
 **Current:** no search in the hierarchy. The Add Component dialog HAS one — copy that pattern:

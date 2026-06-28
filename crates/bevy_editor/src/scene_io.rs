@@ -43,6 +43,7 @@ use serde::de::DeserializeSeed;
 
 use crate::actions::{OpenImportDialog, OpenOpenDialog, OpenSaveDialog, SceneIoRequest, SpawnKind};
 use crate::markers::SceneEntity;
+use crate::project::ActiveProject;
 use crate::spawning::{apply_kind_visuals, spawn_kind, SpawnedAs};
 use crate::state::EditorSelection;
 use crate::ui::icons;
@@ -50,8 +51,6 @@ use crate::ui::style::dialog_frame;
 use crate::ui::{AssetContent, CloseOverlay, SeedText, ShowToast};
 use crate::undo::push_undo;
 
-/// Directory (relative to the working dir) where scene files live.
-const SCENES_DIR: &str = "assets/scenes";
 /// Scene-file extension. Scenes are full `DynamicWorld` serializations.
 const SCENE_EXT: &str = ".scn.ron";
 /// Fallback file name used by *Save* when no scene has been named yet.
@@ -60,7 +59,7 @@ const DEFAULT_SCENE: &str = "scene.scn.ron";
 /// The currently-open scene file, if any.
 #[derive(Resource, Default)]
 pub struct CurrentScene {
-    /// File name (within [`SCENES_DIR`]) of the open scene.
+    /// File name (within the project's `assets/scenes`) of the open scene.
     pub path: Option<String>,
     /// Whether the scene has unsaved edits since the last save/open.
     pub dirty: bool,
@@ -221,11 +220,12 @@ fn clear_scene(scene_entities: &Query<Entity, With<SceneEntity>>, commands: &mut
 /// computed transform/visibility components are denied (they can't round-trip through asset
 /// handles and are rebuilt from each entity's [`SpawnedAs`] on load).
 fn write_scene(world: &mut World, name: &str) -> Result<(), String> {
+    let dir = world.resource::<ActiveProject>().scenes_dir();
     let ron = scene_to_ron(world)?;
-    std::fs::create_dir_all(SCENES_DIR).map_err(|e| e.to_string())?;
-    let path = format!("{SCENES_DIR}/{name}");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(name);
     std::fs::write(&path, ron).map_err(|e| e.to_string())?;
-    info!("Saved scene to {path}");
+    info!("Saved scene to {}", path.display());
     Ok(())
 }
 
@@ -248,6 +248,13 @@ fn scene_to_ron(world: &mut World) -> Result<String, String> {
         .deny_component::<ViewVisibility>()
         // Computed render bookkeeping that holds non-serializable `TypeId`s.
         .deny_component::<VisibilityClass>()
+        // UI runtime/computed components: the camera link is rebuilt by `ui_edit`, and the
+        // computed-layout components are recomputed each frame.
+        .deny_component::<bevy_ui::UiTargetCamera>()
+        .deny_component::<bevy_ui::ComputedNode>()
+        .deny_component::<bevy_ui::ComputedUiTargetCamera>()
+        .deny_component::<bevy_ui::ComputedUiRenderTargetInfo>()
+        .deny_component::<bevy_ui::ContentSize>()
         .extract_entities(ids.into_iter())
         .build();
     dynamic.serialize(&registry).map_err(|e| e.to_string())
@@ -258,7 +265,7 @@ fn scene_to_ron(world: &mut World) -> Result<String, String> {
 /// otherwise the loaded entities are added to it (Instantiate / prefab drop). Returns the
 /// number of entities written.
 fn open_scene(world: &mut World, name: &str, clear: bool) -> Result<usize, String> {
-    let path = format!("{SCENES_DIR}/{name}");
+    let path = world.resource::<ActiveProject>().scenes_dir().join(name);
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let registry = world.resource::<AppTypeRegistry>().clone();
 
@@ -327,6 +334,7 @@ fn rebuild_asset_browser(
     mut dirty: ResMut<AssetBrowserDirty>,
     content_q: Query<Entity, With<AssetContent>>,
     asset_server: Res<AssetServer>,
+    project: Res<ActiveProject>,
     mut commands: Commands,
 ) {
     if !dirty.0 {
@@ -337,24 +345,18 @@ fn rebuild_asset_browser(
     };
     dirty.0 = false;
 
-    let scenes = list_scene_files();
-    let images = list_image_files();
+    let mut entries = Vec::new();
+    collect_asset_tree(&project.assets_dir(), "", 0, &mut entries);
 
     commands.entity(content).despawn_children();
-    if scenes.is_empty() && images.is_empty() {
-        commands
-            .entity(content)
-            .queue_spawn_related_scenes::<Children>(vec![empty_hint()]);
-        return;
-    }
-
     let mut rows: Vec<Box<dyn SceneList>> = Vec::new();
-    for name in scenes {
-        rows.push(Box::new(EntityScene(asset_entry(name))));
-    }
-    for name in images {
-        let handle = asset_server.load(name.clone());
-        rows.push(Box::new(EntityScene(image_thumb(name, handle))));
+    rows.push(Box::new(EntityScene(import_button())));
+    if entries.is_empty() {
+        rows.push(Box::new(EntityScene(empty_hint())));
+    } else {
+        for e in &entries {
+            rows.push(asset_tree_row(e, &asset_server));
+        }
     }
     commands
         .entity(content)
@@ -368,66 +370,154 @@ fn empty_hint() -> impl Scene {
     }
 }
 
-/// A saved scene / prefab entry. Clicking it instantiates the scene into the current one.
-fn asset_entry(name: String) -> impl Scene {
-    let display = name.clone();
+/// The "Import Asset" button at the top of the asset tree.
+fn import_button() -> impl Scene {
     bsn! {
-        Node {
-            min_height: px(22),
-            padding: UiRect::axes(px(8), px(3)),
-            align_items: AlignItems::Center,
-        }
-        ThemeBackgroundColor(tokens::BUTTON_BG)
-        AssetEntry { name: name }
-        EntityCursor::System(SystemCursorIcon::Pointer)
-        Children [ (label(display) Pickable::IGNORE) ]
-    }
-}
-
-/// An image asset entry, shown as a small live thumbnail with its filename.
-fn image_thumb(name: String, handle: Handle<Image>) -> impl Scene {
-    bsn! {
-        Node {
-            width: px(76),
-            display: Display::Flex,
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: px(2),
-        }
+        Node { padding: UiRect::axes(px(4), px(2)) }
         Children [
-            (ImageNode { image: handle } Node { width: px(60), height: px(60) } Pickable::IGNORE),
-            (label_dim(name) Pickable::IGNORE),
+            (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! {
+                (Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(6) }
+                    Children [ (icon(icons::IMPORT) ThemedText), (Text("Import Asset") ThemedText) ]) } }
+                on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenImportDialog); }))
         ]
     }
 }
 
-/// List `*.ron` scene files in the scenes directory, sorted.
-fn list_scene_files() -> Vec<String> {
+/// Kind of filesystem entry shown in the asset tree.
+enum AssetKind {
+    Dir,
+    Scene,
+    Image,
+    Other,
+}
+
+/// One depth-tagged row of the recursive asset tree.
+struct AssetTreeEntry {
+    /// Path relative to the assets dir (forward-slash separated) — used for `AssetServer` loads.
+    rel: String,
+    /// Display name (last path segment).
+    name: String,
+    /// Indent depth.
+    depth: usize,
+    kind: AssetKind,
+}
+
+/// Recursively collect the assets directory into a flat, depth-tagged list (dirs first, sorted).
+fn collect_asset_tree(
+    dir: &std::path::Path,
+    rel_prefix: &str,
+    depth: usize,
+    out: &mut Vec<AssetTreeEntry>,
+) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut items: Vec<_> = rd.flatten().collect();
+    items.sort_by_key(|e| (!e.path().is_dir(), e.file_name()));
+    for entry in items {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel = if rel_prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+        if path.is_dir() {
+            out.push(AssetTreeEntry {
+                rel: rel.clone(),
+                name: name.clone(),
+                depth,
+                kind: AssetKind::Dir,
+            });
+            collect_asset_tree(&path, &rel, depth + 1, out);
+        } else {
+            let lower = name.to_ascii_lowercase();
+            let kind = if lower.ends_with(SCENE_EXT) {
+                AssetKind::Scene
+            } else if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")
+            {
+                AssetKind::Image
+            } else {
+                AssetKind::Other
+            };
+            out.push(AssetTreeEntry {
+                rel,
+                name,
+                depth,
+                kind,
+            });
+        }
+    }
+}
+
+/// Left padding for an asset-tree row at `depth`.
+fn indent(depth: usize) -> bevy_ui::Val {
+    px(4.0 + depth as f32 * 12.0)
+}
+
+fn asset_tree_row(e: &AssetTreeEntry, asset_server: &AssetServer) -> Box<dyn SceneList> {
+    match e.kind {
+        AssetKind::Dir => Box::new(EntityScene(tree_label_row(
+            e.depth,
+            icons::FOLDER,
+            e.name.clone(),
+        ))),
+        AssetKind::Other => Box::new(EntityScene(tree_label_row(
+            e.depth,
+            icons::FILE,
+            e.name.clone(),
+        ))),
+        AssetKind::Scene => Box::new(EntityScene(scene_tree_row(e.depth, e.name.clone()))),
+        AssetKind::Image => {
+            let handle = asset_server.load(e.rel.clone());
+            Box::new(EntityScene(image_tree_row(e.depth, e.name.clone(), handle)))
+        }
+    }
+}
+
+/// A non-interactive tree row: indent + icon + name (folders, plain files).
+fn tree_label_row(depth: usize, icon_path: &'static str, name: String) -> impl Scene {
+    let pad = indent(depth);
+    bsn! {
+        (Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(6), padding: UiRect::new(pad, px(4), px(2), px(2)) }
+            Children [ (icon(icon_path) ThemedText Pickable::IGNORE), (label(name) Pickable::IGNORE) ])
+    }
+}
+
+/// A scene/prefab row. Clicking it instantiates the scene into the current one.
+fn scene_tree_row(depth: usize, name: String) -> impl Scene {
+    let pad = indent(depth);
+    let display = name.clone();
+    bsn! {
+        (Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(6), padding: UiRect::new(pad, px(4), px(2), px(2)), min_height: px(20) }
+            ThemeBackgroundColor(tokens::BUTTON_BG)
+            AssetEntry { name: name }
+            EntityCursor::System(SystemCursorIcon::Pointer)
+            Children [ (icon(icons::FILE) ThemedText Pickable::IGNORE), (label(display) Pickable::IGNORE) ])
+    }
+}
+
+/// An image row with a small live thumbnail.
+fn image_tree_row(depth: usize, name: String, handle: Handle<Image>) -> impl Scene {
+    let pad = indent(depth);
+    bsn! {
+        (Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(6), padding: UiRect::new(pad, px(4), px(2), px(2)) }
+            Children [
+                (ImageNode { image: handle } Node { width: px(18), height: px(18) } Pickable::IGNORE),
+                (label(name) Pickable::IGNORE),
+            ])
+    }
+}
+
+/// List `*.scn.ron` scene files in `scenes_dir`, sorted.
+fn list_scene_files(scenes_dir: &std::path::Path) -> Vec<String> {
     let mut files: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(SCENES_DIR) {
+    if let Ok(entries) = std::fs::read_dir(scenes_dir) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
                 && name.ends_with(SCENE_EXT)
             {
                 files.push(name.to_string());
-            }
-        }
-    }
-    files.sort();
-    files
-}
-
-/// List top-level image files in `assets/`, as paths relative to the asset root (so they
-/// can be loaded via `AssetServer`), sorted.
-fn list_image_files() -> Vec<String> {
-    let mut files: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("assets") {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                let lower = name.to_ascii_lowercase();
-                if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-                    files.push(name.to_string());
-                }
             }
         }
     }
@@ -486,8 +576,8 @@ fn on_save_confirm(
     commands.trigger(CloseOverlay);
 }
 
-fn on_open_open_dialog(_: On<OpenOpenDialog>, mut commands: Commands) {
-    let files = list_scene_files();
+fn on_open_open_dialog(_: On<OpenOpenDialog>, project: Res<ActiveProject>, mut commands: Commands) {
+    let files = list_scene_files(&project.scenes_dir());
     commands.queue(move |world: &mut World| {
         let _ = world.spawn_scene(open_dialog_overlay());
         let mut list_q = world.query_filtered::<Entity, With<OpenDialogList>>();
@@ -585,6 +675,7 @@ fn on_import_confirm(
     act: On<Activate>,
     buttons: Query<(), With<ImportConfirmButton>>,
     inputs: Query<&EditableText, With<ImportPathInput>>,
+    project: Res<ActiveProject>,
     mut browser_dirty: ResMut<AssetBrowserDirty>,
     mut commands: Commands,
 ) {
@@ -598,7 +689,7 @@ fn on_import_confirm(
     if src.is_empty() {
         return;
     }
-    match import_file(&src) {
+    match import_file(&src, &project.assets_dir()) {
         Ok(dest) => {
             info!("Imported asset to {dest}");
             browser_dirty.0 = true;
@@ -612,14 +703,14 @@ fn on_import_confirm(
     commands.trigger(CloseOverlay);
 }
 
-/// Copy a source file into `assets/`, returning the destination path.
-fn import_file(src: &str) -> Result<String, String> {
+/// Copy a source file into the project's `assets/` directory, returning the destination path.
+fn import_file(src: &str, assets_dir: &std::path::Path) -> Result<String, String> {
     let file_name = std::path::Path::new(src)
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| "source has no file name".to_string())?;
-    std::fs::create_dir_all("assets").map_err(|e| e.to_string())?;
-    let dest = format!("assets/{file_name}");
+    std::fs::create_dir_all(assets_dir).map_err(|e| e.to_string())?;
+    let dest = assets_dir.join(file_name).display().to_string();
     std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
     Ok(dest)
 }

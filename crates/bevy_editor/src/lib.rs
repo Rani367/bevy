@@ -28,14 +28,24 @@ mod state;
 mod tabs;
 mod undo;
 
+pub mod animation;
+pub mod audio;
+pub mod code;
+pub mod diagnostics;
+pub mod gameplay;
 pub mod hierarchy;
 pub mod inspector;
+pub mod material;
+pub mod project;
 pub mod scene_io;
 pub mod ui;
+pub mod ui_edit;
 pub mod viewport;
 
 pub use actions::*;
+pub use code::MainView;
 pub use markers::*;
+pub use project::{ActiveProject, BuildProfile, ProjectConfig, RecentProjects};
 pub use remote::{
     brp_despawn, brp_mutate, brp_query_entities, brp_request, brp_spawn, normalize_addr,
     parse_entity_ids,
@@ -77,6 +87,8 @@ impl PluginGroup for EditorPlugins {
             .add(InfiniteGridPlugin)
             // Core state, selection, reflect registrations.
             .add(EditorPlugin)
+            // Project model: active project, recents, New/Open/scaffold.
+            .add(project::ProjectPlugin)
             // The paneled editor shell (menu bar, toolbar, panels).
             .add(ui::EditorUiPlugin)
             // Offscreen scene camera bound into the viewport panel.
@@ -95,6 +107,20 @@ impl PluginGroup for EditorPlugins {
             .add(scripting::ScriptingPlugin)
             // Build / export (cargo build, scene export).
             .add(build_export::BuildExportPlugin)
+            // In-editor Rust code editor + cargo check/run.
+            .add(code::CodePlugin)
+            // Stats / debugger panel + frame stepping.
+            .add(diagnostics::DiagnosticsPlugin)
+            // Animation playback panel.
+            .add(animation::AnimationEditorPlugin)
+            // StandardMaterial editor panel.
+            .add(material::MaterialEditorPlugin)
+            // UI/Control authoring (preview game UI in the viewport).
+            .add(ui_edit::UiEditPlugin)
+            // First-party physics / particles / tilemap.
+            .add(gameplay::GameplayPlugin)
+            // Audio master-volume mixer.
+            .add(audio::AudioEditorPlugin)
             // Multi-scene tabs.
             .add(tabs::TabsPlugin)
             // Remote (BRP) inspection + editing over the Bevy Remote Protocol.

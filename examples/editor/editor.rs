@@ -110,6 +110,30 @@ fn take_screenshot(
             match open.as_str() {
                 "save" => commands.trigger(bevy::editor::OpenSaveDialog),
                 "import" => commands.trigger(bevy::editor::OpenImportDialog),
+                "newproject" => commands.trigger(bevy::editor::project::OpenNewProjectDialog),
+                "openproject" => commands.trigger(bevy::editor::project::OpenOpenProjectDialog),
+                "code" => {
+                    commands.queue(|world: &mut World| {
+                        if let Some(mut view) = world.get_resource_mut::<bevy::editor::MainView>() {
+                            *view = bevy::editor::MainView::Code;
+                        }
+                    });
+                }
+                "stats" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                    bevy::editor::ui::BottomTab::Stats,
+                )),
+                "material" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                    bevy::editor::ui::BottomTab::Material,
+                )),
+                "animation" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                    bevy::editor::ui::BottomTab::Animation,
+                )),
+                "settings" => commands.trigger(bevy::editor::project::OpenProjectSettings),
+                "uinode" => commands.trigger(bevy::editor::SpawnRequest(SpawnKind::UiNode)),
+                "audio" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                    bevy::editor::ui::BottomTab::Audio,
+                )),
+                "physics" => commands.trigger(bevy::editor::gameplay::SpawnPhysicsCube),
                 "palette" => commands.trigger(bevy::editor::ui::OpenCommandPalette),
                 "console" => commands.trigger(bevy::editor::ui::ToggleConsole),
                 "theme" => commands.trigger(bevy::editor::ui::ToggleTheme),

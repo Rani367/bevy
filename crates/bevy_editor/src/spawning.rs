@@ -16,6 +16,8 @@ use bevy_pbr::{MeshMaterial3d, StandardMaterial};
 use bevy_reflect::Reflect;
 use bevy_sprite::Sprite;
 use bevy_transform::components::Transform;
+use bevy_ui::widget::Text;
+use bevy_ui::{px, BackgroundColor, Node, PositionType};
 
 use crate::actions::SpawnKind;
 use crate::markers::SceneEntity;
@@ -42,6 +44,8 @@ pub fn default_name(kind: SpawnKind) -> &'static str {
         SpawnKind::DirectionalLight => "Directional Light",
         SpawnKind::Sprite => "Sprite",
         SpawnKind::Empty => "Empty",
+        SpawnKind::UiNode => "UI Node",
+        SpawnKind::UiText => "UI Text",
     }
 }
 
@@ -75,6 +79,30 @@ pub fn spawn_kind(
         }
         SpawnKind::Empty => {
             commands.entity(entity).insert(Visibility::default());
+        }
+        SpawnKind::UiNode => {
+            commands.entity(entity).insert((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(40.0),
+                    top: px(40.0),
+                    width: px(200.0),
+                    height: px(120.0),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgba(0.2, 0.4, 0.8, 0.85)),
+            ));
+        }
+        SpawnKind::UiText => {
+            commands.entity(entity).insert((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(40.0),
+                    top: px(40.0),
+                    ..Default::default()
+                },
+                Text::new("Text"),
+            ));
         }
         // Mesh / sprite kinds get their runtime-built visuals from the shared helper.
         SpawnKind::Cube | SpawnKind::Sphere | SpawnKind::Plane | SpawnKind::Sprite => {
@@ -124,6 +152,10 @@ pub fn apply_kind_visuals(
                 Vec2::splat(100.0),
             ));
         }
-        SpawnKind::PointLight | SpawnKind::DirectionalLight | SpawnKind::Empty => {}
+        SpawnKind::PointLight
+        | SpawnKind::DirectionalLight
+        | SpawnKind::Empty
+        | SpawnKind::UiNode
+        | SpawnKind::UiText => {}
     }
 }

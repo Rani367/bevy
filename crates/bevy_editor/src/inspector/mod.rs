@@ -24,6 +24,7 @@ use bevy_feathers::tokens;
 use bevy_input_focus::InputFocus;
 use bevy_reflect::enums::{DynamicEnum, DynamicVariant, VariantInfo};
 use bevy_reflect::std_traits::ReflectDefault;
+use bevy_reflect::structs::Struct;
 use bevy_reflect::tuple::DynamicTuple;
 use bevy_reflect::{
     GetPath, PartialReflect, Reflect, ReflectMut, ReflectRef, TypeInfo, TypeRegistry,
@@ -277,6 +278,15 @@ enum FieldValue {
     OptionToggle {
         is_some: bool,
     },
+    /// A `Vec2`/`Vec3`/`Vec4`/`Quat`: one labeled row with per-axis colored inputs (each writing
+    /// `path.x` / `.y` / `.z` / `.w`). `axes` is `(axis_name, value)` in declaration order.
+    Vec {
+        axes: Vec<(String, f64)>,
+    },
+    /// A non-editable color preview swatch (the editable R/G/B/A channels follow it).
+    ColorSwatch {
+        rgba: [f32; 4],
+    },
     ReadOnly(String),
 }
 
@@ -397,6 +407,16 @@ fn field_widget(field: &FieldModel, target: Entity, component: TypeId) -> Box<dy
             field.path.clone(),
             *is_some,
         ))),
+        FieldValue::Vec { axes } => vec_field(
+            field.label.clone(),
+            target,
+            component,
+            field.path.clone(),
+            axes.clone(),
+        ),
+        FieldValue::ColorSwatch { rgba } => {
+            Box::new(EntityScene(color_swatch_field(field.label.clone(), *rgba)))
+        }
         FieldValue::ReadOnly(text) => Box::new(EntityScene(readonly_field(
             field.label.clone(),
             text.clone(),
@@ -517,9 +537,17 @@ fn push_field(
         return;
     }
 
-    // Color: editable R/G/B/A channels, each writing the whole color at this path.
+    // Color: a preview swatch followed by editable R/G/B/A channels, each writing the whole
+    // color at this path.
     if let Some(c) = field.try_downcast_ref::<Color>() {
         let s = c.to_srgba();
+        out.push(FieldModel::leaf(
+            label,
+            path,
+            FieldValue::ColorSwatch {
+                rgba: [s.red, s.green, s.blue, s.alpha],
+            },
+        ));
         for (suffix, chan, val) in [
             ("r", NumTy::ColorR, s.red),
             ("g", NumTy::ColorG, s.green),
@@ -664,21 +692,26 @@ fn push_field(
         return;
     }
 
-    if depth < 3
-        && let ReflectRef::Struct(s) = field.reflect_ref()
-    {
-        for i in 0..s.field_len() {
-            let child_name = s.name_at(i).unwrap_or("?");
-            if let Some(child) = s.field_at(i) {
-                let child_path = if path.is_empty() {
-                    child_name.to_string()
-                } else {
-                    format!("{path}.{child_name}")
-                };
-                push_field(child, &child_path, child_name, depth + 1, out);
-            }
+    if let ReflectRef::Struct(s) = field.reflect_ref() {
+        // `Vec2`/`Vec3`/`Vec4`/`Quat`: collapse the x/y/z/w fields into one labeled row.
+        if let Some(axes) = vector_axes(s) {
+            out.push(FieldModel::leaf(label, path, FieldValue::Vec { axes }));
+            return;
         }
-        return;
+        if depth < 3 {
+            for i in 0..s.field_len() {
+                let child_name = s.name_at(i).unwrap_or("?");
+                if let Some(child) = s.field_at(i) {
+                    let child_path = if path.is_empty() {
+                        child_name.to_string()
+                    } else {
+                        format!("{path}.{child_name}")
+                    };
+                    push_field(child, &child_path, child_name, depth + 1, out);
+                }
+            }
+            return;
+        }
     }
 
     out.push(FieldModel::leaf(
@@ -810,6 +843,114 @@ fn axis_label(label: &str) -> Option<&'static str> {
         "w" | "W" => Some("W"),
         _ => None,
     }
+}
+
+/// Detect a `Vec2`/`Vec3`/`Vec4`/`Quat`-shaped struct (2–4 `f32` fields named x/y/z/w) and
+/// return its `(axis, value)` pairs in declaration order, or `None` if it isn't one.
+fn vector_axes(s: &dyn Struct) -> Option<Vec<(String, f64)>> {
+    let n = s.field_len();
+    if !(2..=4).contains(&n) {
+        return None;
+    }
+    let mut axes = Vec::with_capacity(n);
+    for i in 0..n {
+        let name = s.name_at(i)?;
+        if !matches!(name, "x" | "y" | "z" | "w") {
+            return None;
+        }
+        let v = s.field_at(i)?.try_downcast_ref::<f32>().copied()?;
+        axes.push((name.to_string(), v as f64));
+    }
+    Some(axes)
+}
+
+/// One colored axis number input for a grouped vector row, writing back to `base.axis`.
+fn axis_input(
+    target: Entity,
+    component: TypeId,
+    base_path: &str,
+    axis: &str,
+    value: f64,
+) -> impl Scene {
+    let path = if base_path.is_empty() {
+        axis.to_string()
+    } else {
+        format!("{base_path}.{axis}")
+    };
+    let sigil = axis_sigil(axis, NumTy::F32);
+    let label = axis_label(axis);
+    let niv = NumberInputValue::F32(value as f32);
+    bsn! {
+        (
+            @FeathersNumberInput { @sigil_color: sigil, @label_text: label }
+            template_value(niv)
+            NumberInputPrecision(3)
+            FieldBinding { target: target, component: component, path: path, kind: FieldKind::Num(NumTy::F32), variants: Vec::new(), op: FieldOp::Scalar }
+            Node { flex_grow: 1.0, min_width: px(0) }
+        )
+    }
+}
+
+/// A grouped vector row: the field label plus 2–4 colored axis inputs side by side
+/// (e.g. `Translation: [X][Y][Z]`).
+fn vec_field(
+    field_label: String,
+    target: Entity,
+    component: TypeId,
+    base_path: String,
+    axes: Vec<(String, f64)>,
+) -> Box<dyn SceneList> {
+    let bp = base_path.as_str();
+    match axes.as_slice() {
+        [a0, a1] => Box::new(EntityScene(field_row(
+            field_label.clone(),
+            bsn! {
+                (Node { flex_grow: 1.0, flex_direction: FlexDirection::Row, column_gap: px(4) }
+                    Children [
+                        (axis_input(target, component, bp, &a0.0, a0.1)),
+                        (axis_input(target, component, bp, &a1.0, a1.1)),
+                    ])
+            },
+        ))),
+        [a0, a1, a2] => Box::new(EntityScene(field_row(
+            field_label.clone(),
+            bsn! {
+                (Node { flex_grow: 1.0, flex_direction: FlexDirection::Row, column_gap: px(4) }
+                    Children [
+                        (axis_input(target, component, bp, &a0.0, a0.1)),
+                        (axis_input(target, component, bp, &a1.0, a1.1)),
+                        (axis_input(target, component, bp, &a2.0, a2.1)),
+                    ])
+            },
+        ))),
+        [a0, a1, a2, a3] => Box::new(EntityScene(field_row(
+            field_label.clone(),
+            bsn! {
+                (Node { flex_grow: 1.0, flex_direction: FlexDirection::Row, column_gap: px(4) }
+                    Children [
+                        (axis_input(target, component, bp, &a0.0, a0.1)),
+                        (axis_input(target, component, bp, &a1.0, a1.1)),
+                        (axis_input(target, component, bp, &a2.0, a2.1)),
+                        (axis_input(target, component, bp, &a3.0, a3.1)),
+                    ])
+            },
+        ))),
+        _ => Box::new(EntityScene(readonly_field(
+            field_label,
+            format!("{axes:?}"),
+        ))),
+    }
+}
+
+/// A non-editable color preview swatch row (the R/G/B/A channel inputs follow it).
+fn color_swatch_field(field_label: String, rgba: [f32; 4]) -> impl Scene {
+    let color = Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]);
+    field_row(
+        field_label,
+        bsn! {
+            (Node { width: px(48), height: px(16) } template_value(bevy_ui::BackgroundColor(color)))
+        },
+    )
 }
 
 fn bool_field(
@@ -1637,11 +1778,12 @@ fn on_remove_component_button(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_component_rows, apply_element_patch, apply_structural, axis_sigil, FieldOp, NumTy,
+        add_component_rows, apply_element_patch, apply_structural, axis_sigil, vector_axes,
+        FieldOp, NumTy,
     };
     use alloc::collections::BTreeMap;
     use bevy_feathers::tokens;
-    use bevy_reflect::TypeRegistry;
+    use bevy_reflect::{PartialReflect, Reflect, ReflectRef, TypeRegistry};
     use core::any::TypeId;
 
     fn registry() -> TypeRegistry {
@@ -1665,6 +1807,53 @@ mod tests {
             axis_sigil("anything", NumTy::ColorG),
             tokens::TEXT_INPUT_Y_AXIS
         );
+    }
+
+    #[test]
+    fn vector_axes_detects_vec3_and_quat() {
+        use bevy_math::{Quat, Vec3};
+        let v = Vec3::new(1.0, 2.0, 3.0);
+        let ReflectRef::Struct(s) = v.reflect_ref() else {
+            panic!("Vec3 is a struct");
+        };
+        let axes = vector_axes(s).expect("Vec3 is a vector");
+        assert_eq!(axes.len(), 3);
+        assert_eq!(axes[0], ("x".to_string(), 1.0));
+        assert_eq!(axes[2], ("z".to_string(), 3.0));
+
+        let q = Quat::IDENTITY;
+        let ReflectRef::Struct(s) = q.reflect_ref() else {
+            panic!("Quat is a struct");
+        };
+        let axes = vector_axes(s).expect("Quat is a vector");
+        assert_eq!(axes.len(), 4, "x/y/z/w");
+        assert_eq!(axes[3].0, "w");
+    }
+
+    #[test]
+    fn vector_axes_rejects_non_vectors() {
+        #[derive(Reflect, Default)]
+        struct NotVec {
+            a: f32,
+            b: f32,
+        }
+        let n = NotVec::default();
+        let ReflectRef::Struct(s) = n.reflect_ref() else {
+            panic!();
+        };
+        assert!(vector_axes(s).is_none(), "fields not named x/y/z/w");
+
+        // A struct whose axis-named fields aren't f32 is also rejected.
+        #[derive(Reflect, Default)]
+        struct IntVec {
+            x: i32,
+            y: i32,
+        }
+        let iv = IntVec::default();
+        let ReflectRef::Struct(s) = iv.reflect_ref() else {
+            panic!();
+        };
+        assert!(vector_axes(s).is_none(), "axes must be f32");
     }
 
     #[test]
