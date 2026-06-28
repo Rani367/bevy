@@ -41,6 +41,7 @@ pub mod material;
 pub mod project;
 pub mod scene_io;
 pub mod theme_editor;
+pub mod tilemap;
 pub mod ui;
 pub mod ui_edit;
 pub mod viewport;
@@ -122,6 +123,8 @@ impl PluginGroup for EditorPlugins {
             .add(ui_edit::UiEditPlugin)
             // First-party physics / particles / tilemap.
             .add(gameplay::GameplayPlugin)
+            // Tilemap palette / grid editor panel.
+            .add(tilemap::TilemapEditorPlugin)
             // Audio master-volume mixer.
             .add(audio::AudioEditorPlugin)
             // Game-UI theme-token editor.

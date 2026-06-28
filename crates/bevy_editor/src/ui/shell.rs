@@ -19,8 +19,8 @@ use bevy_scene::prelude::*;
 use bevy_state::state::{NextState, State};
 use bevy_ui::widget::Text;
 use bevy_ui::{
-    percent, px, AlignItems, AlignSelf, Display, FlexDirection, GlobalZIndex, IsDefaultUiCamera,
-    Node, Overflow, UiRect,
+    percent, px, AlignItems, AlignSelf, Display, FlexDirection, IsDefaultUiCamera, Node, Overflow,
+    UiRect, Val,
 };
 use bevy_ui_widgets::{Activate, ScrollArea};
 use bevy_window::SystemCursorIcon;
@@ -44,10 +44,7 @@ use crate::ui::style::{etokens, sizes, space};
 use crate::ui::{BottomTab, ShowBottomTab};
 use crate::undo::{RequestRedo, RequestUndo};
 
-use super::docking::{
-    Panel, PanelCollapseButton, PanelContent, PanelFloatButton, PanelHeader, PanelId,
-};
-use super::splitter::{on_splitter_drag, ResizeSide, Splitter};
+use super::splitter::{on_splitter_drag, ResizeSide, SplitAxis, Splitter};
 use super::{
     AssetContent, EditorUiCamera, HierarchyContent, InspectorContent, SeedText, TabBarContent,
     ViewportSlot,
@@ -128,8 +125,7 @@ fn editor_root() -> impl Scene {
             menu_bar(),
             toolbar(),
             tab_bar(),
-            body_row(),
-            asset_row(),
+            main_row(),
             crate::ui::bottom_dock::bottom_dock_panel(),
             crate::ui::status_bar::status_bar(),
         ]
@@ -354,6 +350,8 @@ fn view_menu() -> impl Scene {
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::ui::ToggleConsole); })),
                 (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::COMMAND, "Command Palette", "⌘P")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::ui::OpenCommandPalette); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::INFO, "Keyboard Shortcuts", "?")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::ui::OpenShortcuts); })),
                 @FeathersMenuDivider,
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SLIDERS, "Stats Panel")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Stats)); })),
@@ -361,6 +359,10 @@ fn view_menu() -> impl Scene {
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Animation)); })),
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SPHERE, "Material Panel")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Material)); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::GRID, "Tilemap Panel")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Tilemap)); })),
+                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SQUARE, "UI Layout Panel")) } }
+                    on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Ui)); })),
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::BUILD, "Output Panel")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(ShowBottomTab(BottomTab::Output)); })),
             ]),
@@ -496,10 +498,10 @@ fn tab_bar() -> impl Scene {
 }
 
 // ---------------------------------------------------------------------------
-// Body row: Hierarchy | Viewport | Inspector
+// Main row: Hierarchy | (Viewport / Code over Assets) | Inspector
 // ---------------------------------------------------------------------------
 
-fn body_row() -> impl Scene {
+fn main_row() -> impl Scene {
     bsn! {
         Node {
             display: Display::Flex,
@@ -510,21 +512,39 @@ fn body_row() -> impl Scene {
         }
         Children [
             hierarchy_panel(),
-            splitter_v(ResizeSide::Prev),
-            center_area(),
-            splitter_v(ResizeSide::Next),
+            splitter(ResizeSide::Prev, SplitAxis::Horizontal),
+            center_column(),
+            splitter(ResizeSide::Next, SplitAxis::Horizontal),
             inspector_panel(),
         ]
     }
 }
 
-/// The center column: the scene viewport and the code editor stacked, with only the one
-/// matching the current [`MainView`] shown.
-fn center_area() -> impl Scene {
+/// The center column: the viewport/code stack on top, the Assets panel below, divided by a
+/// horizontal splitter.
+fn center_column() -> impl Scene {
     bsn! {
         Node {
             flex_grow: 1.0,
             min_width: px(150),
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+        }
+        Children [
+            center_area(),
+            splitter(ResizeSide::Next, SplitAxis::Vertical),
+            assets_panel(),
+        ]
+    }
+}
+
+/// The scene viewport and the code editor stacked, with only the one matching the current
+/// [`MainView`] shown.
+fn center_area() -> impl Scene {
+    bsn! {
+        Node {
+            flex_grow: 1.0,
+            min_height: px(80),
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
         }
@@ -535,6 +555,7 @@ fn center_area() -> impl Scene {
     }
 }
 
+/// The Hierarchy panel: header, entity search, and the entity tree.
 fn hierarchy_panel() -> impl Scene {
     bsn! {
         Node {
@@ -543,10 +564,8 @@ fn hierarchy_panel() -> impl Scene {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
         }
-        Panel(PanelId::Hierarchy)
-        GlobalZIndex(0)
         Children [
-            dockable_header(icons::LIST, "Hierarchy", PanelId::Hierarchy),
+            panel_header(icons::LIST, "Hierarchy"),
             (
                 Node {
                     flex_direction: FlexDirection::Row,
@@ -577,7 +596,6 @@ fn hierarchy_panel() -> impl Scene {
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)
                 ScrollArea
                 HierarchyContent
-                PanelContent(PanelId::Hierarchy)
             ),
         ]
     }
@@ -606,6 +624,7 @@ fn viewport_panel() -> impl Scene {
     }
 }
 
+/// The Inspector panel: header + the reflection-driven component editor list.
 fn inspector_panel() -> impl Scene {
     bsn! {
         Node {
@@ -614,10 +633,8 @@ fn inspector_panel() -> impl Scene {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
         }
-        Panel(PanelId::Inspector)
-        GlobalZIndex(0)
         Children [
-            dockable_header(icons::SLIDERS, "Inspector", PanelId::Inspector),
+            panel_header(icons::SLIDERS, "Inspector"),
             (
                 Node {
                     flex_grow: 1.0,
@@ -631,25 +648,22 @@ fn inspector_panel() -> impl Scene {
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)
                 ScrollArea
                 InspectorContent
-                PanelContent(PanelId::Inspector)
             ),
         ]
     }
 }
 
-fn asset_row() -> impl Scene {
+/// The Assets panel: header + the asset-browser entries.
+fn assets_panel() -> impl Scene {
     bsn! {
         Node {
-            min_height: sizes::ASSET_ROW_H,
+            height: sizes::ASSET_ROW_H,
+            min_height: px(80),
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
-            border: UiRect::top(px(1)),
         }
-        ThemeBorderColor(etokens::PANEL_BORDER)
-        Panel(PanelId::Assets)
-        GlobalZIndex(0)
         Children [
-            dockable_header(icons::FOLDER_TREE, "Assets", PanelId::Assets),
+            panel_header(icons::FOLDER_TREE, "Assets"),
             (
                 Node {
                     flex_grow: 1.0,
@@ -664,7 +678,6 @@ fn asset_row() -> impl Scene {
                 ThemeBackgroundColor(tokens::PANE_BODY_BG)
                 ScrollArea
                 AssetContent
-                PanelContent(PanelId::Assets)
             ),
         ]
     }
@@ -693,41 +706,22 @@ fn panel_header(icon_path: &'static str, title: impl Into<String>) -> impl Scene
     }
 }
 
-/// A header for a dockable panel: a leading icon + draggable title (drag to float/move the
-/// panel) with collapse and float toggle buttons (icons).
-fn dockable_header(icon_path: &'static str, title: impl Into<String>, id: PanelId) -> impl Scene {
+/// A draggable splitter handle that resizes a neighboring panel. Horizontal handles resize a
+/// column's width; vertical handles resize a row's height.
+fn splitter(side: ResizeSide, axis: SplitAxis) -> impl Scene {
+    let (width, height, cursor) = match axis {
+        SplitAxis::Horizontal => (sizes::SPLITTER_W, Val::Auto, SystemCursorIcon::EwResize),
+        SplitAxis::Vertical => (Val::Auto, sizes::SPLITTER_W, SystemCursorIcon::NsResize),
+    };
     bsn! {
         Node {
-            min_height: sizes::PANEL_HEADER_H,
-            padding: UiRect::horizontal(px(8)),
-            align_items: AlignItems::Center,
-            column_gap: px(6),
-            border: UiRect::bottom(px(1)),
-        }
-        ThemeBackgroundColor(tokens::PANE_HEADER_BG)
-        ThemeBorderColor(etokens::PANEL_BORDER)
-        PanelHeader(id)
-        Children [
-            (icon(icon_path) ThemedText Pickable::IGNORE),
-            // The title area ignores picking so drags fall through to the header itself.
-            (Node { flex_grow: 1.0 } Pickable::IGNORE Children [ (label(title) Pickable::IGNORE) ]),
-            (@FeathersToolButton { @variant: ButtonVariant::Plain, @caption: bsn! { (icon(icons::CHEVRON_DOWN)) } }
-                PanelCollapseButton(id)),
-            (@FeathersToolButton { @variant: ButtonVariant::Plain, @caption: bsn! { (icon(icons::FLOAT)) } }
-                PanelFloatButton(id)),
-        ]
-    }
-}
-
-fn splitter_v(side: ResizeSide) -> impl Scene {
-    bsn! {
-        Node {
-            width: sizes::SPLITTER_W,
+            width: width,
+            height: height,
             align_self: AlignSelf::Stretch,
         }
         ThemeBackgroundColor(etokens::PANEL_BORDER)
-        Splitter { resize: side }
-        bevy_feathers::cursor::EntityCursor::System(SystemCursorIcon::EwResize)
+        Splitter { resize: side, axis: axis }
+        bevy_feathers::cursor::EntityCursor::System(cursor)
         on(on_splitter_drag)
     }
 }

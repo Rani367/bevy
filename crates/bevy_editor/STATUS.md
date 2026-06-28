@@ -35,15 +35,16 @@ Everything compiles **zero-warning** (`cargo fmt --check`, `cargo clippy --all-t
 (`pub use bevy_editor as editor`) and the root `Cargo.toml` (`bevy_editor` feature + the
 `editor` example).
 
-## 2. UI shell + dockable panels — ✅
-- Window-filling paneled layout: menu bar (File / Edit / Entity / View / Build), toolbar,
-  scene-tab strip, body row (Hierarchy | Viewport | Inspector), Assets row. Dark theme.
-- **Panel scrolling** — Hierarchy / Inspector / Asset panels are `ScrollArea`s.
-- **Resizable splitters** — drag handles resize neighboring panels, clamped to `[120, 900]`px.
-- **In-window dockable panels** (`ui/docking.rs`) — each side panel can be **collapsed** (body
-  hidden) and **torn off to float** (dragged by its header, then re-docked) via header buttons;
-  layout is data-driven through `DockState` (`apply_dock_layout` sets the content `Display` and
-  the root `position_type`/offset/z-index).
+## 2. UI shell + panels — ✅
+- Window-filling paneled layout: menu bar (Project / File / Edit / Entity / GameObject / View /
+  Build), toolbar, scene-tab strip, the **Hierarchy / Viewport / Inspector / Assets** panels, and
+  a status bar. Light + dark themes.
+- **Fixed panels** (`ui/shell.rs`) — Hierarchy on the left, Inspector on the right, Assets along
+  the bottom of the center column, with a plain icon+title header each. (An earlier experiment with
+  draggable / tabbable / floatable panels was removed — see §28.)
+- **Panel scrolling** — Hierarchy / Inspector / Asset panel bodies are `ScrollArea`s.
+- **Resizable panels** — splitter handles (`ui/splitter.rs`) resize the neighboring panel:
+  horizontal handles for the Hierarchy/Inspector columns, a vertical handle for the Assets row.
 
 ## 3. Viewport — ✅
 - Offscreen scene camera → `ViewportNode`; 3D scene (infinite grid + lit meshes) renders in the
@@ -279,11 +280,41 @@ Tests: **59** green (up from 36). New `EDITOR_SHOT_OPEN` arms: `themeeditor`, `l
 
 ---
 
+## 28. Godot-style feature expansion — ✅
+
+A second wave bringing the editor closer to a full Godot/Unity-style engine. All gated by change
+detection / dirty flags and covered by unit tests + `editor_verify`.
+
+- **Fixed panels** (`src/ui/shell.rs`, `src/ui/splitter.rs`): the layout is Hierarchy (left),
+  Inspector (right), and Assets (bottom of the center column), each a fixed panel with a plain
+  header, separated by resize splitters. (A draggable/tabbable/floatable docking experiment was
+  built and then removed at the user's request — `docking.rs` is gone; only the resize splitters
+  remain.)
+- **Keyboard-shortcuts cheat sheet** (`src/ui/help_overlay.rs`): a data-driven `?`/`F1` overlay
+  (also View menu + palette), categorized keycap rows.
+- **Tilemap editor** (`src/tilemap.rs`): a **Tilemap** dock tab with a visual tile palette (click a
+  swatch to set the brush, active swatch ringed) and non-destructive grid resize, on top of the
+  existing in-viewport painter. Spawning a tilemap auto-opens the palette.
+- **Keyframe animation editor** (`src/animation.rs`): replaced playback-only controls with a real
+  in-tree **timeline** — an `EditedAnimation` reflected component with per-channel keyframe tracks
+  over `Transform` (position/rotation/scale XYZ). Controls (Play/Stop/Add Key/Remove Key/Duration),
+  a scrub slider playhead, and per-channel lanes with keyframe diamonds. Pose → Add Key → Play.
+  Serializes with the scene.
+- **UI / canvas layout editor** (`src/ui_edit.rs`): a **UI** dock tab with a 3×3 Godot-style
+  anchor-preset grid (corner pins / edge stretch / auto-margin centering), a Relative/Absolute
+  toggle, Fill-Parent, and width/height presets — editing the selected node's `Node` live.
+- **Perf**: `bind_ui_to_viewport` reduced from a per-frame full scan to acting only on unbound
+  nodes / camera rebuilds.
+
+The bottom dock now hosts 10 tabs (added **Tilemap**, **UI**).
+
+---
+
 ## How to re-verify
 ```sh
 cargo fmt --check
 cargo clippy -p bevy_editor --all-targets            # zero warnings
-cargo test -p bevy_editor                            # 59 tests
+cargo test -p bevy_editor                            # 73 tests
 cargo run --example editor_verify --features bevy_editor   # behavioral invariants (exits 0)
 cargo run --example editor --features bevy_editor    # exercise the interactive paths
 # Visual capture of any surface (see examples/editor/editor.rs's EDITOR_SHOT_OPEN arms):

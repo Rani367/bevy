@@ -72,6 +72,7 @@ enum PaletteAction {
     PhysicsCube,
     ParticleEmitter,
     Tilemap,
+    Shortcuts,
 }
 
 /// One palette entry: a label, an icon, and the action to run.
@@ -157,6 +158,7 @@ fn build_registry(mut commands: Commands) {
         ("Export Scene", icons::EXPORT, Export),
         ("Toggle Light / Dark Theme", icons::SUN, ToggleTheme),
         ("Toggle Console", icons::TERMINAL, ToggleConsole),
+        ("Keyboard Shortcuts", icons::INFO, Shortcuts),
         ("Connect to Remote", icons::REMOTE, Connect),
     ];
     commands.insert_resource(CommandRegistry(
@@ -288,6 +290,7 @@ fn on_palette_activate(
         PaletteAction::PhysicsCube => commands.trigger(SpawnPhysicsCube),
         PaletteAction::ParticleEmitter => commands.trigger(SpawnParticleEmitter),
         PaletteAction::Tilemap => commands.trigger(SpawnTilemap),
+        PaletteAction::Shortcuts => commands.trigger(crate::ui::OpenShortcuts),
     }
     commands.trigger(CloseOverlay);
 }

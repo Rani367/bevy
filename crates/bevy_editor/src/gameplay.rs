@@ -139,11 +139,11 @@ pub struct TilePaint {
 }
 
 /// Number of palette entries including the empty slot (`0`).
-const PALETTE_LEN: u32 = 9;
+pub(crate) const PALETTE_LEN: u32 = 9;
 
 /// Color for a tile palette index. `0` (empty) is drawn as the checkerboard background by the
 /// rebuild, so this only needs the painted colors `1..=8`.
-fn palette_color(index: u32) -> Color {
+pub(crate) fn palette_color(index: u32) -> Color {
     match index {
         1 => Color::srgb(0.85, 0.30, 0.30),
         2 => Color::srgb(0.30, 0.70, 0.35),
@@ -495,6 +495,8 @@ fn on_spawn_tilemap(_: On<SpawnTilemap>, mut commands: Commands) {
         crate::spawning::SpawnedAs(SpawnKind::Empty),
         Tilemap::default(),
     ));
+    // Surface the palette so the new tilemap is immediately paintable.
+    commands.trigger(crate::ui::ShowBottomTab(crate::ui::BottomTab::Tilemap));
 }
 
 #[cfg(test)]

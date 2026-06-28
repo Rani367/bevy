@@ -5,7 +5,7 @@
 pub mod bottom_dock;
 pub mod command_palette;
 pub mod console;
-pub mod docking;
+pub mod help_overlay;
 pub mod icons;
 mod shell;
 pub mod shortcuts;
@@ -16,7 +16,7 @@ pub mod theme_switch;
 pub mod toast;
 
 pub use bottom_dock::{BottomDock, BottomTab, OutputContent, ShowBottomTab};
-pub use docking::{DockState, Panel, PanelContent, PanelId};
+pub use help_overlay::OpenShortcuts;
 pub use splitter::{ResizeSide, Splitter};
 pub use toast::{ShowToast, ToastLevel};
 
@@ -144,7 +144,6 @@ pub struct EditorUiPlugin;
 impl Plugin for EditorUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            docking::DockingPlugin,
             bottom_dock::BottomDockPlugin,
             status_bar::StatusBarPlugin,
             theme_switch::ThemeSwitchPlugin,
@@ -152,6 +151,7 @@ impl Plugin for EditorUiPlugin {
             toast::ToastPlugin,
             command_palette::CommandPalettePlugin,
             console::ConsolePlugin,
+            help_overlay::HelpOverlayPlugin,
         ))
         .add_systems(Startup, shell::editor_shell.spawn())
         .add_systems(

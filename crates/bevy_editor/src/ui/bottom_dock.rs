@@ -44,11 +44,15 @@ pub enum BottomTab {
     Theme,
     /// Localization string-table editor.
     Localization,
+    /// Tilemap palette + grid editor.
+    Tilemap,
+    /// UI / canvas layout editor.
+    Ui,
 }
 
 impl BottomTab {
     /// All tabs, in display order.
-    pub const ALL: [BottomTab; 8] = [
+    pub const ALL: [BottomTab; 10] = [
         BottomTab::Console,
         BottomTab::Output,
         BottomTab::Stats,
@@ -57,6 +61,8 @@ impl BottomTab {
         BottomTab::Audio,
         BottomTab::Theme,
         BottomTab::Localization,
+        BottomTab::Tilemap,
+        BottomTab::Ui,
     ];
 
     /// Human-readable tab title.
@@ -70,6 +76,8 @@ impl BottomTab {
             BottomTab::Audio => "Audio",
             BottomTab::Theme => "Theme",
             BottomTab::Localization => "Localization",
+            BottomTab::Tilemap => "Tilemap",
+            BottomTab::Ui => "UI",
         }
     }
 
@@ -84,6 +92,8 @@ impl BottomTab {
             BottomTab::Audio => icons::PLAY,
             BottomTab::Theme => icons::SUN,
             BottomTab::Localization => icons::LIST,
+            BottomTab::Tilemap => icons::GRID,
+            BottomTab::Ui => icons::SQUARE,
         }
     }
 
@@ -98,6 +108,8 @@ impl BottomTab {
             BottomTab::Audio => "audio",
             BottomTab::Theme => "theme",
             BottomTab::Localization => "localization",
+            BottomTab::Tilemap => "tilemap",
+            BottomTab::Ui => "ui",
         }
     }
 
@@ -250,6 +262,8 @@ pub fn bottom_dock_panel() -> impl Scene {
                     (crate::audio::audio_body() BottomTabContent(BottomTab::Audio)),
                     (crate::theme_editor::theme_editor_body() BottomTabContent(BottomTab::Theme)),
                     (crate::localization::localization_body() BottomTabContent(BottomTab::Localization)),
+                    (crate::tilemap::tilemap_body() BottomTabContent(BottomTab::Tilemap)),
+                    (crate::ui_edit::ui_body() BottomTabContent(BottomTab::Ui)),
                 ]
             ),
         ]

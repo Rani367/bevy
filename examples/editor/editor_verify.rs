@@ -57,6 +57,10 @@ struct VerifyState {
 
 /// Drives the staged checks across frames (the hierarchy/inspector rebuild a frame or two after
 /// the scene changes, so assertions are spaced out to let them settle).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "staged end-to-end verification touches many editor subsystems"
+)]
 fn verify_system(
     mut state: ResMut<VerifyState>,
     selection: Res<EditorSelection>,
@@ -81,7 +85,10 @@ fn verify_system(
                 "demo scene should leave an entity selected"
             );
             let scene = scene_q.iter().count();
-            assert!(scene >= 3, "demo scene should have ≥3 entities, got {scene}");
+            assert!(
+                scene >= 3,
+                "demo scene should have ≥3 entities, got {scene}"
+            );
             state.scene_before_spawn = scene;
 
             // Spawn another entity at runtime; the hierarchy + selection should follow.

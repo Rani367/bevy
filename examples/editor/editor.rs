@@ -105,7 +105,9 @@ fn take_screenshot(
         return;
     }
     // Optionally open a dialog/overlay before capturing, to screenshot it.
-    if req.frame == 60 && let Ok(open) = std::env::var("EDITOR_SHOT_OPEN") {
+    if req.frame == 60
+        && let Ok(open) = std::env::var("EDITOR_SHOT_OPEN")
+    {
         match open.as_str() {
             "save" => commands.trigger(bevy::editor::OpenSaveDialog),
             "import" => commands.trigger(bevy::editor::OpenImportDialog),
@@ -134,9 +136,6 @@ fn take_screenshot(
             "material" => commands.trigger(bevy::editor::ui::ShowBottomTab(
                 bevy::editor::ui::BottomTab::Material,
             )),
-            "animation" => commands.trigger(bevy::editor::ui::ShowBottomTab(
-                bevy::editor::ui::BottomTab::Animation,
-            )),
             "settings" => commands.trigger(bevy::editor::project::OpenProjectSettings),
             "uinode" => commands.trigger(bevy::editor::SpawnRequest(SpawnKind::UiNode)),
             "audio" => commands.trigger(bevy::editor::ui::ShowBottomTab(
@@ -150,6 +149,129 @@ fn take_screenshot(
             )),
             "physics" => commands.trigger(bevy::editor::gameplay::SpawnPhysicsCube),
             "palette" => commands.trigger(bevy::editor::ui::OpenCommandPalette),
+            "shortcuts" => commands.trigger(bevy::editor::ui::OpenShortcuts),
+            // Spawn + select a UI node and open the UI layout panel.
+            "uilayout" => {
+                commands.queue(|world: &mut World| {
+                    let entity = world
+                        .spawn((
+                            bevy::editor::SceneEntity,
+                            Name::new("UI Node"),
+                            Node {
+                                width: Val::Px(140.0),
+                                height: Val::Px(64.0),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.30, 0.50, 0.85)),
+                        ))
+                        .id();
+                    if let Some(mut sel) = world.get_resource_mut::<EditorSelection>()
+                    {
+                        sel.set_single(entity);
+                    }
+                    if let Some(mut dock) = world.get_resource_mut::<bevy::editor::ui::BottomDock>()
+                    {
+                        dock.open = true;
+                        dock.active = bevy::editor::ui::BottomTab::Ui;
+                    }
+                });
+            }
+            // Seed a keyframe animation on a fresh entity and open the timeline.
+            "animation" => {
+                commands.queue(|world: &mut World| {
+                    use bevy::editor::animation::{
+                        AnimChannel, AnimTrack, EditedAnimation, Keyframe,
+                    };
+                    let entity = world
+                        .spawn((
+                            bevy::editor::SceneEntity,
+                            Name::new("Animated"),
+                            Transform::from_xyz(0.0, 0.5, 0.0),
+                            EditedAnimation {
+                                duration: 2.0,
+                                time: 0.6,
+                                tracks: vec![
+                                    AnimTrack {
+                                        channel: AnimChannel::PosX,
+                                        keys: vec![
+                                            Keyframe {
+                                                time: 0.0,
+                                                value: -1.2,
+                                            },
+                                            Keyframe {
+                                                time: 2.0,
+                                                value: 1.2,
+                                            },
+                                        ],
+                                    },
+                                    AnimTrack {
+                                        channel: AnimChannel::PosY,
+                                        keys: vec![
+                                            Keyframe {
+                                                time: 0.0,
+                                                value: 0.5,
+                                            },
+                                            Keyframe {
+                                                time: 1.0,
+                                                value: 2.0,
+                                            },
+                                            Keyframe {
+                                                time: 2.0,
+                                                value: 0.5,
+                                            },
+                                        ],
+                                    },
+                                    AnimTrack {
+                                        channel: AnimChannel::RotY,
+                                        keys: vec![
+                                            Keyframe {
+                                                time: 0.0,
+                                                value: 0.0,
+                                            },
+                                            Keyframe {
+                                                time: 2.0,
+                                                value: 180.0,
+                                            },
+                                        ],
+                                    },
+                                ],
+                                ..Default::default()
+                            },
+                        ))
+                        .id();
+                    if let Some(mut sel) = world.get_resource_mut::<EditorSelection>()
+                    {
+                        sel.set_single(entity);
+                    }
+                    if let Some(mut dock) = world.get_resource_mut::<bevy::editor::ui::BottomDock>()
+                    {
+                        dock.open = true;
+                        dock.active = bevy::editor::ui::BottomTab::Animation;
+                    }
+                });
+            }
+            // Spawn + select a tilemap and open its palette to verify the tilemap editor.
+            "tilemap" => {
+                commands.queue(|world: &mut World| {
+                    let entity = world
+                        .spawn((
+                            bevy::editor::SceneEntity,
+                            Name::new("Tilemap"),
+                            Transform::default(),
+                            bevy::editor::gameplay::Tilemap::default(),
+                        ))
+                        .id();
+                    if let Some(mut sel) = world.get_resource_mut::<EditorSelection>()
+                    {
+                        sel.set_single(entity);
+                    }
+                    if let Some(mut dock) = world.get_resource_mut::<bevy::editor::ui::BottomDock>()
+                    {
+                        dock.open = true;
+                        dock.active = bevy::editor::ui::BottomTab::Tilemap;
+                    }
+                });
+            }
             "console" => commands.trigger(bevy::editor::ui::ToggleConsole),
             "theme" => commands.trigger(bevy::editor::ui::ToggleTheme),
             "toast" => {
@@ -162,7 +284,9 @@ fn take_screenshot(
         }
     }
     // Let icons (embedded assets) and the viewport settle before capturing.
-    if req.frame == 90 && let Some(handle) = req.target.clone() {
+    if req.frame == 90
+        && let Some(handle) = req.target.clone()
+    {
         let path = req.path.clone();
         commands
             .spawn(Screenshot(RenderTarget::Image(handle.into())))
