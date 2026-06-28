@@ -15,6 +15,7 @@ use crate::actions::{
 };
 use crate::state::{EditorSelection, GizmoMode};
 use crate::ui::{OpenCommandPalette, ToggleConsole};
+use crate::undo::{RequestRedo, RequestUndo};
 use crate::viewport::FrameSelectionRequest;
 
 fn editor_shortcuts(
@@ -53,6 +54,13 @@ fn editor_shortcuts(
         }
         if keys.just_pressed(KeyCode::KeyP) {
             commands.trigger(OpenCommandPalette);
+        }
+        if keys.just_pressed(KeyCode::KeyZ) {
+            if shift {
+                commands.trigger(RequestRedo);
+            } else {
+                commands.trigger(RequestUndo);
+            }
         }
     }
 

@@ -15,21 +15,26 @@ use bevy_color::Color;
 use bevy_ecs::hierarchy::ChildOf;
 use bevy_ecs::name::Name;
 use bevy_ecs::prelude::*;
+use bevy_input::keyboard::KeyCode;
+use bevy_input::ButtonInput;
+use bevy_input_focus::InputFocus;
 use bevy_math::primitives::Sphere;
 use bevy_math::{Vec2, Vec3};
 use bevy_mesh::{Mesh, Mesh3d};
 use bevy_pbr::{MeshMaterial3d, StandardMaterial};
+use bevy_picking::events::{Click, Pointer};
 use bevy_reflect::std_traits::ReflectDefault;
 use bevy_reflect::Reflect;
 use bevy_sprite::Sprite;
 use bevy_state::state::{OnEnter, State};
+use bevy_text::EditableText;
 use bevy_time::Time;
 use bevy_transform::components::Transform;
 
 use crate::actions::SpawnKind;
 use crate::markers::SceneEntity;
 use crate::spawning::spawn_kind;
-use crate::state::EditorState;
+use crate::state::{EditorSelection, EditorState};
 
 // ---------------------------------------------------------------------------
 // Components
@@ -91,7 +96,9 @@ struct Particle {
     velocity: Vec3,
 }
 
-/// A grid of tile sprites, rebuilt whenever this component changes.
+/// A paintable grid of tile sprites, rebuilt whenever this component changes. `tiles` holds a
+/// palette index per cell (`0` = empty, row-major `y * width + x`); it serializes with the
+/// scene so painting is persistent. An empty/short `tiles` vec renders as the empty grid.
 #[derive(Component, Reflect, Debug, Clone)]
 #[reflect(Component, Default)]
 pub struct Tilemap {
@@ -101,6 +108,8 @@ pub struct Tilemap {
     pub height: u32,
     /// World size of each tile.
     pub tile_size: f32,
+    /// Palette index per cell, row-major (`y * width + x`). `0` = empty.
+    pub tiles: Vec<u32>,
 }
 
 impl Default for Tilemap {
@@ -109,13 +118,65 @@ impl Default for Tilemap {
             width: 8,
             height: 6,
             tile_size: 32.0,
+            tiles: Vec::new(),
         }
     }
 }
 
-/// Marks a generated tile (child of a [`Tilemap`]); not serialized.
-#[derive(Component)]
-struct Tile;
+/// Marks a generated tile (child of a [`Tilemap`]), tagged with its grid cell so clicks can
+/// paint it. Not serialized (rebuilt from [`Tilemap`]).
+#[derive(Component, Default)]
+struct Tile {
+    x: u32,
+    y: u32,
+}
+
+/// The active paint brush: which palette index clicking a tile writes (`0` = erase).
+#[derive(Resource, Default)]
+pub struct TilePaint {
+    /// Palette index painted on click (`0` erases).
+    pub index: u32,
+}
+
+/// Number of palette entries including the empty slot (`0`).
+const PALETTE_LEN: u32 = 9;
+
+/// Color for a tile palette index. `0` (empty) is drawn as the checkerboard background by the
+/// rebuild, so this only needs the painted colors `1..=8`.
+fn palette_color(index: u32) -> Color {
+    match index {
+        1 => Color::srgb(0.85, 0.30, 0.30),
+        2 => Color::srgb(0.30, 0.70, 0.35),
+        3 => Color::srgb(0.30, 0.50, 0.85),
+        4 => Color::srgb(0.90, 0.80, 0.30),
+        5 => Color::srgb(0.65, 0.40, 0.80),
+        6 => Color::srgb(0.30, 0.75, 0.80),
+        7 => Color::srgb(0.90, 0.55, 0.25),
+        8 => Color::srgb(0.55, 0.40, 0.25),
+        _ => Color::srgb(0.80, 0.80, 0.85),
+    }
+}
+
+/// Set cell `(x, y)` of a `width`×`height` grid to `value`, sizing/initializing the backing
+/// vec as needed. Returns whether the grid actually changed (so callers can skip a rebuild).
+fn paint_cell(tiles: &mut Vec<u32>, x: u32, y: u32, width: u32, height: u32, value: u32) -> bool {
+    let w = width.min(128) as usize;
+    let h = height.min(128) as usize;
+    if x as usize >= w || y as usize >= h {
+        return false;
+    }
+    let needed = w * h;
+    let idx = y as usize * w + x as usize;
+    let resize = tiles.len() != needed;
+    if !resize && tiles.get(idx).copied() == Some(value) {
+        return false;
+    }
+    if resize {
+        tiles.resize(needed, 0);
+    }
+    tiles[idx] = value;
+    true
+}
 
 const GRAVITY: f32 = -9.81;
 
@@ -145,6 +206,7 @@ impl Plugin for GameplayPlugin {
         app.register_type::<RigidBody>()
             .register_type::<ParticleEmitter>()
             .register_type::<Tilemap>()
+            .init_resource::<TilePaint>()
             .add_systems(
                 Update,
                 (
@@ -152,12 +214,14 @@ impl Plugin for GameplayPlugin {
                     emit_particles,
                     update_particles,
                     rebuild_tilemaps,
+                    tilemap_paint_hotkeys,
                 ),
             )
             .add_systems(OnEnter(EditorState::Editing), clear_particles)
             .add_observer(on_spawn_physics_cube)
             .add_observer(on_spawn_emitter)
-            .add_observer(on_spawn_tilemap);
+            .add_observer(on_spawn_tilemap)
+            .add_observer(paint_tile);
     }
 }
 
@@ -296,11 +360,17 @@ fn rebuild_tilemaps(
         let size = map.tile_size.max(1.0);
         for y in 0..h {
             for x in 0..w {
-                let checker = (x + y) % 2 == 0;
-                let color = if checker {
-                    Color::srgb(0.35, 0.35, 0.4)
+                let idx = y as usize * w as usize + x as usize;
+                let value = map.tiles.get(idx).copied().unwrap_or(0);
+                let color = if value == 0 {
+                    // Empty cell: checkerboard background.
+                    if (x + y) % 2 == 0 {
+                        Color::srgb(0.35, 0.35, 0.4)
+                    } else {
+                        Color::srgb(0.25, 0.25, 0.3)
+                    }
                 } else {
-                    Color::srgb(0.25, 0.25, 0.3)
+                    palette_color(value)
                 };
                 let px = (x as f32 - w as f32 / 2.0) * size;
                 let py = (y as f32 - h as f32 / 2.0) * size;
@@ -308,11 +378,80 @@ fn rebuild_tilemaps(
                     .spawn((
                         Sprite::from_color(color, Vec2::splat(size * 0.95)),
                         Transform::from_xyz(px, py, 0.0),
-                        Tile,
+                        Tile { x, y },
                     ))
                     .id();
                 commands.entity(map_entity).add_child(tile);
             }
+        }
+    }
+}
+
+/// Click a tile of the *selected* tilemap to paint it with the current [`TilePaint`] brush.
+/// Requiring selection avoids painting a map you only meant to click-select.
+fn paint_tile(
+    click: On<Pointer<Click>>,
+    tiles: Query<(&Tile, &ChildOf)>,
+    selection: Res<EditorSelection>,
+    paint: Res<TilePaint>,
+    mut maps: Query<&mut Tilemap>,
+) {
+    let Ok((tile, parent)) = tiles.get(click.entity) else {
+        return;
+    };
+    let map_entity = parent.parent();
+    if !selection.contains(map_entity) {
+        return;
+    }
+    let value = paint.index.min(PALETTE_LEN - 1);
+    // Peek read-only first so a no-op click (same cell, same brush) doesn't trigger a rebuild.
+    {
+        let Ok(map) = maps.get(map_entity) else {
+            return;
+        };
+        let w = map.width.min(128) as usize;
+        let h = map.height.min(128) as usize;
+        if tile.x as usize >= w || tile.y as usize >= h {
+            return;
+        }
+        let idx = tile.y as usize * w + tile.x as usize;
+        if map.tiles.len() == w * h && map.tiles.get(idx).copied() == Some(value) {
+            return;
+        }
+    }
+    if let Ok(mut map) = maps.get_mut(map_entity) {
+        let (x, y, w, h) = (tile.x, tile.y, map.width, map.height);
+        paint_cell(&mut map.tiles, x, y, w, h, value);
+    }
+}
+
+/// Pick the paint brush with number keys while a tilemap is selected (`0` = erase, `1..=8` =
+/// palette colors). Suppressed while typing so it doesn't fire mid-edit.
+fn tilemap_paint_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<InputFocus>,
+    editables: Query<(), With<EditableText>>,
+    selection: Res<EditorSelection>,
+    maps: Query<(), With<Tilemap>>,
+    mut paint: ResMut<TilePaint>,
+) {
+    let typing = focus.get().is_some_and(|e| editables.contains(e));
+    if typing || !selection.all.iter().any(|e| maps.contains(*e)) {
+        return;
+    }
+    for (key, idx) in [
+        (KeyCode::Digit0, 0),
+        (KeyCode::Digit1, 1),
+        (KeyCode::Digit2, 2),
+        (KeyCode::Digit3, 3),
+        (KeyCode::Digit4, 4),
+        (KeyCode::Digit5, 5),
+        (KeyCode::Digit6, 6),
+        (KeyCode::Digit7, 7),
+        (KeyCode::Digit8, 8),
+    ] {
+        if keys.just_pressed(key) {
+            paint.index = idx;
         }
     }
 }
@@ -356,4 +495,43 @@ fn on_spawn_tilemap(_: On<SpawnTilemap>, mut commands: Commands) {
         crate::spawning::SpawnedAs(SpawnKind::Empty),
         Tilemap::default(),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{paint_cell, palette_color};
+
+    #[test]
+    fn paint_cell_sizes_and_sets() {
+        let mut tiles = Vec::new();
+        assert!(paint_cell(&mut tiles, 1, 1, 3, 2, 5));
+        assert_eq!(tiles.len(), 6, "grid sized to width*height");
+        // (x=1, y=1) in a width-3 grid → index 4 (row-major: y * width + x).
+        assert_eq!(tiles[4], 5, "cell (1,1) set row-major");
+        assert_eq!(tiles[0], 0, "other cells stay empty");
+    }
+
+    #[test]
+    fn paint_cell_noop_returns_false() {
+        let mut tiles = vec![0; 6];
+        assert!(paint_cell(&mut tiles, 0, 0, 3, 2, 4));
+        assert!(
+            !paint_cell(&mut tiles, 0, 0, 3, 2, 4),
+            "painting the same value again is a no-op"
+        );
+    }
+
+    #[test]
+    fn paint_cell_out_of_bounds_is_ignored() {
+        let mut tiles = vec![0; 6];
+        assert!(!paint_cell(&mut tiles, 5, 0, 3, 2, 1));
+        assert!(!paint_cell(&mut tiles, 0, 5, 3, 2, 1));
+        assert_eq!(tiles, vec![0; 6], "grid unchanged by out-of-bounds paint");
+    }
+
+    #[test]
+    fn palette_colors_differ() {
+        assert_ne!(palette_color(1), palette_color(2));
+        assert_ne!(palette_color(1), palette_color(0));
+    }
 }

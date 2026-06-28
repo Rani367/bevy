@@ -193,12 +193,11 @@ Runs on the worker-thread + poll pattern, scoped to the active project's profile
 recursive `.rs` listing, cargo-JSON diagnostic parsing (spans + level filtering), main-view toggle.
 *(Follow-ups: Rust syntax highlighting, rust-analyzer LSP, dylib hot-reload — see TODO.)*
 
-## 19. Inspector grouping + color swatch — ✅ (picker popup pending)
-`src/inspector/mod.rs`. `Vec2`/`Vec3`/`Vec4`/`Quat` now render as **one labeled row** with colored
-axis inputs side-by-side (e.g. `Translation: [X][Y][Z]`) instead of stacked unlabeled rows;
-`Color` shows a **preview swatch** above its editable R/G/B/A channels. Unit-tested vector
-detection. *(Pending: the interactive color-picker popup and a generic per-`TypeId`
-`PropertyEditorRegistry` — see TODO.)*
+## 19. Inspector grouping + color swatch — ✅
+`src/inspector/mod.rs`. `Vec2`/`Vec3`/`Vec4`/`Quat` render as **one labeled row** with colored
+axis inputs side-by-side (e.g. `Translation: [X][Y][Z]`); `Color` shows a clickable **preview
+swatch** above its editable R/G/B/A channels. Unit-tested vector detection. *(Interactive color
+picker + `PropertyEditorRegistry` now done — see §26.)*
 
 ## 20. Project settings + input map — ✅
 `src/project.rs`. A **Project Settings** dialog edits the name, default scene, build profile
@@ -235,16 +234,58 @@ particles run only in play mode.
 master-volume slider. **Build Project** honors the project's profile **and target triple**
 (`cargo build [--release] [--target <triple>]`) for multi-platform export.
 
-**Deferred polish** (documented in TODO): inline Rust **syntax highlighting** (the plain-text
-widget can't style spans without a custom overlay), a game-UI **theme-token editor**, and a
-**localization** string-table editor.
+---
+
+## 26. Remaining TODO items — ✅ (all complete)
+The previously-deferred polish + the 9 numbered TODO items are now done:
+
+- **Inspector write-back feedback** (`src/inspector/mod.rs`): the reflect-write paths
+  (`write_numeric`/`apply_patch`/`cycle_enum`/`on_bool_changed`/string-commit) now surface a
+  warning toast (`warn_set`) instead of failing silently.
+- **Interactive color picker** (`src/inspector/mod.rs`): the `Color` swatch is a clickable
+  `FeathersColorSwatch` button that opens a `dialog_frame` popup — a HueSaturation
+  `FeathersColorPlane` + lightness/alpha `FeathersColorSlider`s + a live preview — round-tripping
+  through the existing reflect-write path (`ActiveColorEdit` + `sync_picker_widgets`).
+- **`PropertyEditorRegistry`** (`src/inspector/mod.rs`): a per-`TypeId` registry consulted first in
+  `push_field`, with `Color` and `Vec2/3/4`/`Quat` registered as built-in editors; falls back to
+  the built-in dispatch. Unit-tested (custom-editor override + fallback).
+- **Hierarchy search** (`src/hierarchy/mod.rs`, `src/ui/shell.rs`): a search box in the hierarchy
+  header drives `HierarchyFilter`; `rebuild_hierarchy` keeps matches **and their ancestors**.
+- **Menu accelerators** (`src/ui/shell.rs`): `menu_item_accel` shows right-aligned dim shortcuts
+  (⌘N/⌘O/⌘S/⇧⌘S/⌘Z/⇧⌘Z/⌘D/⌘P/Del/F/`` ` ``); Undo/Redo (⌘Z/⇧⌘Z) added to `src/ui/shortcuts.rs`.
+- **BRP robustness + tests** (`src/remote.rs`): connect/read/write timeouts + a 4 MiB response cap
+  in `brp_request`; hardened `parse_entity_ids`; failure/success toasts; `#[test]`s for
+  `parse_entity_ids` + `normalize_addr`.
+- **Viewport HUD** (`src/viewport/hud.rs`): a `Pickable::IGNORE` overlay shows gizmo mode / snap /
+  space + camera hints, themed with `etokens::HUD_*`.
+- **Inline Rust syntax highlighting** (`src/code_highlight.rs`, `src/code.rs`): a dependency-free
+  lexer feeds a colored read-only `Text`+`TextSpan` layer rendered behind a glyph-transparent
+  `EditableText` (shared monospace + `NoWrap`); the colored layer tracks the editor's `TextScroll`.
+  Syntax colors are theme tokens (`etokens::SYNTAX_*`). Lexer unit-tested.
+- **Game-UI theme-token editor** (`src/theme_editor.rs`) + **localization string-table editor**
+  (`src/localization.rs`): two new bottom-dock tabs (`BottomTab::{Theme, Localization}`) with
+  add/edit/remove rows that persist to `assets/theme.ron` / `assets/localization.ron`. RON
+  round-trips unit-tested.
+- **2D tilemap painting** (`src/gameplay.rs`): `Tilemap` gained a serialized `tiles: Vec<u32>`;
+  clicking a tile of the selected map paints it with the `TilePaint` brush (number keys `0`–`8`).
+  Index math unit-tested.
+- **Perf** (`src/hierarchy/mod.rs`, `src/scene_io.rs`): `rebuild_hierarchy` debounces bursts;
+  `rebuild_asset_browser` skips re-spawning when the directory listing is unchanged.
+- **`editor_verify` example** (`examples/editor/editor_verify.rs`): boots `EditorPlugins`, runs
+  ~110 frames, and asserts shell/hierarchy-row-count/inspector-populate/spawn invariants.
+
+Tests: **59** green (up from 36). New `EDITOR_SHOT_OPEN` arms: `themeeditor`, `localization`,
+`codehl` (+ `EDITOR_SHOT_FILE`).
 
 ---
 
 ## How to re-verify
 ```sh
 cargo fmt --check
-cargo clippy -p bevy_editor --all-targets
-cargo test -p bevy_editor
-cargo run --example editor --features bevy_editor   # exercise the interactive paths
+cargo clippy -p bevy_editor --all-targets            # zero warnings
+cargo test -p bevy_editor                            # 59 tests
+cargo run --example editor_verify --features bevy_editor   # behavioral invariants (exits 0)
+cargo run --example editor --features bevy_editor    # exercise the interactive paths
+# Visual capture of any surface (see examples/editor/editor.rs's EDITOR_SHOT_OPEN arms):
+EDITOR_SCREENSHOT=/tmp/shot.png EDITOR_SHOT_OPEN=codehl cargo run --example editor --features bevy_editor
 ```

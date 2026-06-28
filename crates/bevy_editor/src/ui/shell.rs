@@ -10,7 +10,7 @@ use bevy_ecs::prelude::*;
 use bevy_feathers::{
     containers::pane_header_divider,
     controls::*,
-    display::{icon, label},
+    display::{icon, label, label_dim},
     theme::{ThemeBackgroundColor, ThemeBorderColor, ThemedText},
     tokens,
 };
@@ -31,6 +31,7 @@ use crate::actions::{
 };
 use crate::build_export::{BuildProjectRequest, ExportSceneRequest};
 use crate::code::{code_panel, CargoCheckRequest, MainView, MainViewNode, RunGameRequest};
+use crate::hierarchy::HierarchySearch;
 use crate::markers::EditorEntity;
 use crate::project::{
     OpenInputMap, OpenNewProjectDialog, OpenOpenProjectDialog, OpenProjectSettings,
@@ -48,7 +49,8 @@ use super::docking::{
 };
 use super::splitter::{on_splitter_drag, ResizeSide, Splitter};
 use super::{
-    AssetContent, EditorUiCamera, HierarchyContent, InspectorContent, TabBarContent, ViewportSlot,
+    AssetContent, EditorUiCamera, HierarchyContent, InspectorContent, SeedText, TabBarContent,
+    ViewportSlot,
 };
 
 /// Marks a toolbar button that should light up (Primary) when its mode/state is active.
@@ -203,6 +205,25 @@ fn menu_item(icon_path: &'static str, text: &'static str) -> impl Scene {
     }
 }
 
+/// A menu item that also shows its keyboard accelerator right-aligned and dimmed
+/// (e.g. `Save … ⌘S`). Use for actions that have a global shortcut in [`crate::ui::shortcuts`].
+fn menu_item_accel(icon_path: &'static str, text: &'static str, accel: &'static str) -> impl Scene {
+    bsn! {
+        Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: px(8),
+            min_width: px(168),
+        }
+        Children [
+            (icon(icon_path) ThemedText),
+            (Text(text) ThemedText),
+            (Node { flex_grow: 1.0, min_width: px(20) }),
+            (label_dim(accel)),
+        ]
+    }
+}
+
 fn file_menu() -> impl Scene {
     bsn! {
         @FeathersMenu
@@ -212,13 +233,13 @@ fn file_menu() -> impl Scene {
                 @arrow: false,
             }),
             (@FeathersMenuPopup Children [
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::FILE_PLUS, "New")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::FILE_PLUS, "New", "⌘N")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(SceneIoRequest::New); })),
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::FOLDER_OPEN, "Open Scene")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::FOLDER_OPEN, "Open Scene", "⌘O")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenOpenDialog); })),
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SAVE, "Save")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::SAVE, "Save", "⌘S")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(SceneIoRequest::Save); })),
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SAVE, "Save As")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::SAVE, "Save As", "⇧⌘S")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(OpenSaveDialog); })),
                 @FeathersMenuDivider,
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::IMPORT, "Import Asset")) } }
@@ -244,14 +265,14 @@ fn edit_menu() -> impl Scene {
                 @arrow: false,
             }),
             (@FeathersMenuPopup Children [
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::UNDO, "Undo")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::UNDO, "Undo", "⌘Z")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(RequestUndo); })),
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::REDO, "Redo")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::REDO, "Redo", "⇧⌘Z")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(RequestRedo); })),
                 @FeathersMenuDivider,
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::DUPLICATE, "Duplicate")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::DUPLICATE, "Duplicate", "⌘D")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(DuplicateRequest); })),
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::TRASH, "Delete Selected")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::TRASH, "Delete Selected", "Del")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(DeleteSelectedRequest); })),
             ]),
         ]
@@ -324,14 +345,14 @@ fn view_menu() -> impl Scene {
             (@FeathersMenuPopup Children [
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::CUBE, "Toggle 2D / 3D")) } }
                     on(|_: On<Activate>, mut m: ResMut<ViewportMode>| { m.toggle(); })),
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::FRAME, "Frame Selection")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::FRAME, "Frame Selection", "F")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::viewport::FrameSelectionRequest); })),
                 @FeathersMenuDivider,
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SUN, "Toggle Light / Dark")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::ui::ToggleTheme); })),
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::TERMINAL, "Toggle Console")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::TERMINAL, "Toggle Console", "`")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::ui::ToggleConsole); })),
-                (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::COMMAND, "Command Palette")) } }
+                (@FeathersMenuItem { @caption: bsn! { (menu_item_accel(icons::COMMAND, "Command Palette", "⌘P")) } }
                     on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::ui::OpenCommandPalette); })),
                 @FeathersMenuDivider,
                 (@FeathersMenuItem { @caption: bsn! { (menu_item(icons::SLIDERS, "Stats Panel")) } }
@@ -526,6 +547,23 @@ fn hierarchy_panel() -> impl Scene {
         GlobalZIndex(0)
         Children [
             dockable_header(icons::LIST, "Hierarchy", PanelId::Hierarchy),
+            (
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: space::SM,
+                    padding: UiRect::axes(space::MD, px(4)),
+                }
+                ThemeBackgroundColor(tokens::PANE_BODY_BG)
+                Children [
+                    (icon(icons::SEARCH) ThemedText Pickable::IGNORE),
+                    (@FeathersTextInputContainer
+                        Node { flex_grow: 1.0 }
+                        Children [
+                            (@FeathersTextInput SeedText(String::new()) HierarchySearch)
+                        ]),
+                ]
+            ),
             (
                 Node {
                     flex_grow: 1.0,

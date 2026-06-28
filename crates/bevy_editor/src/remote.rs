@@ -9,7 +9,7 @@
 
 use alloc::sync::Arc;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ use bevy_ui::{px, Display, FlexDirection, JustifyContent, Node};
 use bevy_ui_widgets::Activate;
 
 use crate::ui::style::dialog_frame;
-use crate::ui::{CloseOverlay, SeedText};
+use crate::ui::{CloseOverlay, SeedText, ShowToast};
 
 /// Default BRP endpoint (matches `bevy_remote`'s defaults).
 const DEFAULT_REMOTE: &str = "127.0.0.1:15702";
@@ -145,11 +145,16 @@ fn poll_remote(mut state: ResMut<RemoteState>, mut commands: Commands) {
         match result {
             Ok(ok) => {
                 info!("Remote query ok: {}", ok.summary);
+                commands.trigger(ShowToast::success(format!(
+                    "Connected: {} remote entities",
+                    ok.entities.len()
+                )));
                 state.entities = ok.entities;
                 commands.spawn_scene(remote_overlay(ok.summary));
             }
             Err(err) => {
                 error!("Remote query failed: {err}");
+                commands.trigger(ShowToast::error("Remote query failed"));
                 commands.spawn_scene(message_overlay(&format!("Remote query failed:\n{err}")));
             }
         }
@@ -173,11 +178,13 @@ fn on_remote_edit(edit: On<RemoteEdit>, mut state: ResMut<RemoteState>, mut comm
     match applied.and_then(|()| brp_query_entities(&addr)) {
         Ok(entities) => {
             let summary = format!("Connected to {addr}\n{} entities", entities.len());
+            commands.trigger(ShowToast::success("Remote updated"));
             state.entities = entities;
             commands.spawn_scene(remote_overlay(summary));
         }
         Err(err) => {
             error!("Remote edit failed: {err}");
+            commands.trigger(ShowToast::error("Remote edit failed"));
             commands.spawn_scene(message_overlay(&format!("Remote edit failed:\n{err}")));
         }
     }
@@ -210,16 +217,30 @@ pub fn brp_request(addr: &str, method: &str, params: &str) -> Result<String, Str
         body.len()
     );
 
-    let mut stream = TcpStream::connect(addr).map_err(|e| format!("connect failed: {e}"))?;
+    // Resolve + connect with a bounded timeout so a wrong/dead address can't hang the worker.
+    let socket = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("invalid address {addr}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("could not resolve address {addr}"))?;
+    let timeout = Duration::from_secs(5);
+    let mut stream =
+        TcpStream::connect_timeout(&socket, timeout).map_err(|e| format!("connect failed: {e}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(timeout))
         .map_err(|e| e.to_string())?;
     stream
         .write_all(request.as_bytes())
         .map_err(|e| e.to_string())?;
 
+    // Cap the response so a misbehaving/hostile peer can't exhaust memory.
+    const MAX_RESPONSE: u64 = 4 * 1024 * 1024;
     let mut response = String::new();
-    stream
+    (&mut stream)
+        .take(MAX_RESPONSE)
         .read_to_string(&mut response)
         .map_err(|e| e.to_string())?;
 
@@ -274,19 +295,29 @@ pub fn brp_mutate(
     brp_request(addr, "world.mutate_components", &params)
 }
 
-/// Crude extraction of numeric `"entity": <id>` values from a BRP response body.
+/// Crude extraction of numeric `"entity": <id>` values from a BRP response body. Defensive
+/// against malformed input: bounded digit runs (so an absurdly long number can't allocate
+/// without bound) and a cap on the number of ids collected.
 pub fn parse_entity_ids(body: &str) -> Vec<u64> {
     const KEY: &str = "\"entity\":";
+    /// `u64::MAX` is 20 digits; anything longer is malformed and overflows on parse anyway.
+    const MAX_DIGITS: usize = 20;
+    /// Sanity cap on how many ids we'll collect from one response.
+    const MAX_IDS: usize = 100_000;
     let mut ids = Vec::new();
     let mut rest = body;
-    while let Some(idx) = rest.find(KEY) {
+    while ids.len() < MAX_IDS {
+        let Some(idx) = rest.find(KEY) else {
+            break;
+        };
         rest = &rest[idx + KEY.len()..];
-        let digits: String = rest
-            .trim_start()
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect();
-        if let Ok(id) = digits.parse::<u64>() {
+        let trimmed = rest.trim_start();
+        // Digits are ASCII (1 byte each), so a byte count is a safe slice length.
+        let digit_len = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+        if digit_len > 0
+            && digit_len <= MAX_DIGITS
+            && let Ok(id) = trimmed[..digit_len].parse::<u64>()
+        {
             ids.push(id);
         }
     }
@@ -375,4 +406,58 @@ fn message_overlay(message: &str) -> impl Scene {
             )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_addr, parse_entity_ids};
+
+    #[test]
+    fn normalize_addr_keeps_host_port() {
+        assert_eq!(normalize_addr("127.0.0.1:15702"), "127.0.0.1:15702");
+        assert_eq!(normalize_addr("localhost:1234"), "localhost:1234");
+    }
+
+    #[test]
+    fn normalize_addr_appends_default_port() {
+        assert_eq!(normalize_addr("localhost"), "localhost:15702");
+        assert_eq!(normalize_addr("127.0.0.1"), "127.0.0.1:15702");
+    }
+
+    #[test]
+    fn normalize_addr_strips_scheme_and_trailing_slash() {
+        assert_eq!(normalize_addr("http://localhost:1234/"), "localhost:1234");
+        assert_eq!(normalize_addr("https://example.com/"), "example.com:15702");
+        assert_eq!(normalize_addr("  127.0.0.1  "), "127.0.0.1:15702");
+    }
+
+    #[test]
+    fn parse_entity_ids_extracts_numbers() {
+        assert_eq!(parse_entity_ids(r#"{"entity":42}"#), vec![42]);
+        assert_eq!(
+            parse_entity_ids(r#"[{"entity": 1}, {"entity":2 }]"#),
+            vec![1, 2]
+        );
+        // Large 64-bit ids round-trip.
+        assert_eq!(
+            parse_entity_ids(r#"{"entity":4294967297}"#),
+            vec![4294967297]
+        );
+    }
+
+    #[test]
+    fn parse_entity_ids_handles_empty_and_garbage() {
+        assert!(parse_entity_ids("").is_empty());
+        assert!(parse_entity_ids("no entities here").is_empty());
+        // Malformed: key present but no following digits.
+        assert!(parse_entity_ids(r#"{"entity":}"#).is_empty());
+        assert!(parse_entity_ids(r#"{"entity":"abc"}"#).is_empty());
+    }
+
+    #[test]
+    fn parse_entity_ids_rejects_overlong_numbers() {
+        // 25 digits overflows u64 and must be skipped, not panic or truncate-into a value.
+        let body = r#"{"entity":1234567890123456789012345}"#;
+        assert!(parse_entity_ids(body).is_empty());
+    }
 }

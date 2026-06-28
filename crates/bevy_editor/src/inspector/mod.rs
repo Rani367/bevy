@@ -9,19 +9,23 @@
 
 use core::any::TypeId;
 
-use bevy_app::{App, Plugin, Update};
-use bevy_color::Color;
+use bevy_app::{App, Plugin, Startup, Update};
+use bevy_color::{Color, Hsla};
 use bevy_ecs::prelude::*;
 use bevy_ecs::reflect::{AppTypeRegistry, ReflectComponent};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_feathers::controls::{
-    ButtonVariant, FeathersButton, FeathersCheckbox, FeathersNumberInput, FeathersTextInput,
-    FeathersTextInputContainer, NumberInputPrecision, NumberInputValue,
+    ButtonVariant, ColorChannel, ColorPlaneValue, ColorSwatchValue, FeathersButton,
+    FeathersCheckbox, FeathersColorPlane, FeathersColorSlider, FeathersColorSwatch,
+    FeathersNumberInput, FeathersTextInput, FeathersTextInputContainer, NumberInputPrecision,
+    NumberInputValue, SliderBaseColor,
 };
 use bevy_feathers::display::{icon, label, label_dim, label_small};
 use bevy_feathers::theme::{ThemeBackgroundColor, ThemeToken, ThemedText};
 use bevy_feathers::tokens;
 use bevy_input_focus::InputFocus;
+use bevy_math::{Vec2, Vec3};
+use bevy_platform::collections::HashMap;
 use bevy_reflect::enums::{DynamicEnum, DynamicVariant, VariantInfo};
 use bevy_reflect::std_traits::ReflectDefault;
 use bevy_reflect::structs::Struct;
@@ -34,12 +38,12 @@ use bevy_scene::EntityScene;
 use bevy_text::EditableText;
 use bevy_ui::widget::Text;
 use bevy_ui::{px, AlignItems, Checked, Display, FlexDirection, Node, UiRect};
-use bevy_ui_widgets::{Activate, ValueChange};
+use bevy_ui_widgets::{Activate, SliderValue, ValueChange};
 
 use crate::scripting::{BehaviorScript, OpenScriptEditor};
 use crate::state::EditorSelection;
 use crate::ui::style::dialog_frame;
-use crate::ui::{icons, InspectorContent, SeedText};
+use crate::ui::{icons, InspectorContent, SeedText, ShowToast};
 use crate::undo::push_undo;
 
 /// A numeric field's concrete type, so edits can be written back to the right Rust type.
@@ -187,6 +191,54 @@ struct AddComponentItems(Vec<(String, TypeId)>);
 #[derive(Event, Clone, Copy)]
 struct OpenAddComponentDialog;
 
+/// Placed on the inspector's color swatch button; carries where to write the picked color back.
+#[derive(Component, Clone)]
+struct ColorSwatchTarget {
+    target: Entity,
+    component: TypeId,
+    path: String,
+}
+
+impl Default for ColorSwatchTarget {
+    fn default() -> Self {
+        Self {
+            target: Entity::PLACEHOLDER,
+            component: TypeId::of::<()>(),
+            path: String::new(),
+        }
+    }
+}
+
+/// Open the interactive color picker popup for a reflected `Color` field.
+#[derive(Event, Clone)]
+struct OpenColorPicker {
+    target: Entity,
+    component: TypeId,
+    path: String,
+}
+
+/// The color currently being edited in the open picker popup, plus where to write it back.
+#[derive(Resource, Clone)]
+struct ActiveColorEdit {
+    target: Entity,
+    component: TypeId,
+    path: String,
+    color: Hsla,
+}
+
+/// Marker on the picker's hue/saturation plane.
+#[derive(Component, Default, Clone, Copy)]
+struct PickerPlane;
+/// Marker on the picker's lightness slider.
+#[derive(Component, Default, Clone, Copy)]
+struct PickerLightness;
+/// Marker on the picker's alpha slider.
+#[derive(Component, Default, Clone, Copy)]
+struct PickerAlpha;
+/// Marker on the picker's live preview swatch.
+#[derive(Component, Default, Clone, Copy)]
+struct PickerPreview;
+
 /// Set when the inspector should be rebuilt (selection changed or components changed).
 #[derive(Resource, Default)]
 struct InspectorDirty(bool);
@@ -205,6 +257,8 @@ impl Plugin for InspectorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InspectorDirty>()
             .init_resource::<InspectorEditSession>()
+            .init_resource::<PropertyEditorRegistry>()
+            .add_systems(Startup, install_default_property_editors)
             .add_systems(
                 Update,
                 (
@@ -213,6 +267,7 @@ impl Plugin for InspectorPlugin {
                     commit_string_fields,
                     apply_init_checked,
                     filter_add_component,
+                    sync_picker_widgets,
                 ),
             )
             .add_observer(on_f32_changed)
@@ -224,15 +279,121 @@ impl Plugin for InspectorPlugin {
             .add_observer(on_open_add_component)
             .add_observer(on_add_component_button)
             .add_observer(on_remove_component_button)
-            .add_observer(on_script_edit_button);
+            .add_observer(on_script_edit_button)
+            .add_observer(on_color_swatch_button)
+            .add_observer(on_open_color_picker)
+            .add_observer(on_picker_plane)
+            .add_observer(on_picker_lightness)
+            .add_observer(on_picker_alpha);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Property-editor registry
+// ---------------------------------------------------------------------------
+
+/// Context handed to a [`PropertyEditorFn`] when it builds field rows for a value.
+pub(crate) struct FieldEditorCtx<'a> {
+    /// The reflected field value.
+    pub value: &'a dyn PartialReflect,
+    /// Reflect path of the value within its component.
+    pub path: &'a str,
+    /// Display label for the field.
+    pub label: &'a str,
+}
+
+/// A per-type property editor: pushes one or more [`FieldModel`]s for the field and returns
+/// `true` if it handled it (short-circuiting the built-in dispatch).
+pub(crate) type PropertyEditorFn = fn(&FieldEditorCtx, &mut Vec<FieldModel>) -> bool;
+
+/// Maps a concrete `TypeId` to a custom field editor. Consulted first by [`push_field`], so
+/// downstream code can override how any reflected type is rendered in the inspector; falls
+/// back to the built-in scalar/enum/collection/struct dispatch when no editor is registered.
+#[derive(Resource, Default)]
+pub struct PropertyEditorRegistry {
+    editors: HashMap<TypeId, PropertyEditorFn>,
+}
+
+impl PropertyEditorRegistry {
+    /// Register a custom editor for type `T`.
+    pub(crate) fn register<T: 'static>(&mut self, editor: PropertyEditorFn) {
+        self.editors.insert(TypeId::of::<T>(), editor);
+    }
+
+    /// Register a custom editor for a `TypeId` known only at runtime.
+    pub(crate) fn register_type_id(&mut self, type_id: TypeId, editor: PropertyEditorFn) {
+        self.editors.insert(type_id, editor);
+    }
+
+    fn get(&self, type_id: TypeId) -> Option<PropertyEditorFn> {
+        self.editors.get(&type_id).copied()
+    }
+}
+
+/// Seed the registry with the built-in editors (color picker + grouped vectors), proving the
+/// mechanism and keeping those special cases data-driven rather than hard-coded in dispatch.
+fn install_default_property_editors(mut registry: ResMut<PropertyEditorRegistry>) {
+    use bevy_math::{Quat, Vec4};
+    registry.register::<Color>(color_editor);
+    registry.register::<Vec2>(vector_editor);
+    registry.register::<Vec3>(vector_editor);
+    // Also exercise the runtime-`TypeId` registration path.
+    registry.register_type_id(TypeId::of::<Vec4>(), vector_editor);
+    registry.register_type_id(TypeId::of::<Quat>(), vector_editor);
+}
+
+/// Built-in editor for [`Color`]: a clickable preview swatch (opens the picker popup) followed
+/// by editable R/G/B/A channels.
+fn color_editor(ctx: &FieldEditorCtx, out: &mut Vec<FieldModel>) -> bool {
+    let Some(c) = ctx.value.try_downcast_ref::<Color>() else {
+        return false;
+    };
+    let s = c.to_srgba();
+    out.push(FieldModel::leaf(
+        ctx.label,
+        ctx.path,
+        FieldValue::ColorSwatch {
+            rgba: [s.red, s.green, s.blue, s.alpha],
+        },
+    ));
+    for (suffix, chan, val) in [
+        ("r", NumTy::ColorR, s.red),
+        ("g", NumTy::ColorG, s.green),
+        ("b", NumTy::ColorB, s.blue),
+        ("a", NumTy::ColorA, s.alpha),
+    ] {
+        out.push(FieldModel::leaf(
+            format!("{}.{suffix}", ctx.label),
+            ctx.path,
+            FieldValue::Num {
+                value: val as f64,
+                ty: chan,
+            },
+        ));
+    }
+    true
+}
+
+/// Built-in editor for `Vec2`/`Vec3`/`Vec4`/`Quat`: one labeled row of colored axis inputs.
+fn vector_editor(ctx: &FieldEditorCtx, out: &mut Vec<FieldModel>) -> bool {
+    if let ReflectRef::Struct(s) = ctx.value.reflect_ref()
+        && let Some(axes) = vector_axes(s)
+    {
+        out.push(FieldModel::leaf(
+            ctx.label,
+            ctx.path,
+            FieldValue::Vec { axes },
+        ));
+        return true;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
 // Model collection
 // ---------------------------------------------------------------------------
 
-struct FieldModel {
+pub(crate) struct FieldModel {
     label: String,
     path: String,
     value: FieldValue,
@@ -414,9 +575,13 @@ fn field_widget(field: &FieldModel, target: Entity, component: TypeId) -> Box<dy
             field.path.clone(),
             axes.clone(),
         ),
-        FieldValue::ColorSwatch { rgba } => {
-            Box::new(EntityScene(color_swatch_field(field.label.clone(), *rgba)))
-        }
+        FieldValue::ColorSwatch { rgba } => Box::new(EntityScene(color_swatch_field(
+            field.label.clone(),
+            target,
+            component,
+            field.path.clone(),
+            *rgba,
+        ))),
         FieldValue::ReadOnly(text) => Box::new(EntityScene(readonly_field(
             field.label.clone(),
             text.clone(),
@@ -435,6 +600,7 @@ fn collect_components(world: &World, entity: Entity) -> Vec<ComponentModel> {
 
     let registry_arc = world.resource::<AppTypeRegistry>().0.clone();
     let registry = registry_arc.read();
+    let editor_registry = world.resource::<PropertyEditorRegistry>();
     let Ok(entity_ref) = world.get_entity(entity) else {
         return Vec::new();
     };
@@ -456,7 +622,7 @@ fn collect_components(world: &World, entity: Entity) -> Vec<ComponentModel> {
             .short_path()
             .to_string();
         let mut fields = Vec::new();
-        collect_component_fields(reflected.as_partial_reflect(), &mut fields);
+        collect_component_fields(editor_registry, reflected.as_partial_reflect(), &mut fields);
         components.push(ComponentModel {
             name,
             type_id,
@@ -467,18 +633,22 @@ fn collect_components(world: &World, entity: Entity) -> Vec<ComponentModel> {
 }
 
 /// Walk a component's top-level fields into [`FieldModel`]s.
-fn collect_component_fields(value: &dyn PartialReflect, out: &mut Vec<FieldModel>) {
+fn collect_component_fields(
+    registry: &PropertyEditorRegistry,
+    value: &dyn PartialReflect,
+    out: &mut Vec<FieldModel>,
+) {
     match value.reflect_ref() {
         ReflectRef::Struct(s) => {
             for i in 0..s.field_len() {
                 let name = s.name_at(i).unwrap_or("?").to_string();
                 if let Some(field) = s.field_at(i) {
-                    push_field(field, &name, &name, 0, out);
+                    push_field(registry, field, &name, &name, 0, out);
                 }
             }
         }
         // A component that *is* an enum (e.g. `Visibility`): one field at the empty path.
-        ReflectRef::Enum(_) => push_field(value, "", "value", 0, out),
+        ReflectRef::Enum(_) => push_field(registry, value, "", "value", 0, out),
         _ => out.push(FieldModel::leaf(
             "value",
             "",
@@ -526,43 +696,29 @@ fn is_option(field: &dyn PartialReflect) -> bool {
 /// Push a single field, recursing into nested structs / collections and mapping known leaf
 /// types to editable widgets.
 fn push_field(
+    registry: &PropertyEditorRegistry,
     field: &dyn PartialReflect,
     path: &str,
     label: &str,
     depth: usize,
     out: &mut Vec<FieldModel>,
 ) {
-    if let Some(value) = scalar_value(field) {
-        out.push(FieldModel::leaf(label, path, value));
-        return;
+    // A registered per-type editor (e.g. Color, Vec3) wins over the built-in dispatch.
+    if let Some(type_id) = field.get_represented_type_info().map(TypeInfo::type_id)
+        && let Some(editor) = registry.get(type_id)
+    {
+        let ctx = FieldEditorCtx {
+            value: field,
+            path,
+            label,
+        };
+        if editor(&ctx, out) {
+            return;
+        }
     }
 
-    // Color: a preview swatch followed by editable R/G/B/A channels, each writing the whole
-    // color at this path.
-    if let Some(c) = field.try_downcast_ref::<Color>() {
-        let s = c.to_srgba();
-        out.push(FieldModel::leaf(
-            label,
-            path,
-            FieldValue::ColorSwatch {
-                rgba: [s.red, s.green, s.blue, s.alpha],
-            },
-        ));
-        for (suffix, chan, val) in [
-            ("r", NumTy::ColorR, s.red),
-            ("g", NumTy::ColorG, s.green),
-            ("b", NumTy::ColorB, s.blue),
-            ("a", NumTy::ColorA, s.alpha),
-        ] {
-            out.push(FieldModel::leaf(
-                format!("{label}.{suffix}"),
-                path,
-                FieldValue::Num {
-                    value: val as f64,
-                    ty: chan,
-                },
-            ));
-        }
+    if let Some(value) = scalar_value(field) {
+        out.push(FieldModel::leaf(label, path, value));
         return;
     }
 
@@ -629,6 +785,7 @@ fn push_field(
         for i in 0..list.len() {
             if let Some(elem) = list.get(i) {
                 push_field(
+                    registry,
                     elem,
                     &format!("{path}[{i}]"),
                     &format!("[{i}]"),
@@ -651,6 +808,7 @@ fn push_field(
         for i in 0..arr.len() {
             if let Some(elem) = arr.get(i) {
                 push_field(
+                    registry,
                     elem,
                     &format!("{path}[{i}]"),
                     &format!("[{i}]"),
@@ -693,11 +851,7 @@ fn push_field(
     }
 
     if let ReflectRef::Struct(s) = field.reflect_ref() {
-        // `Vec2`/`Vec3`/`Vec4`/`Quat`: collapse the x/y/z/w fields into one labeled row.
-        if let Some(axes) = vector_axes(s) {
-            out.push(FieldModel::leaf(label, path, FieldValue::Vec { axes }));
-            return;
-        }
+        // (`Vec2`/`Vec3`/`Vec4`/`Quat` are handled above by the registry's `vector_editor`.)
         if depth < 3 {
             for i in 0..s.field_len() {
                 let child_name = s.name_at(i).unwrap_or("?");
@@ -707,7 +861,7 @@ fn push_field(
                     } else {
                         format!("{path}.{child_name}")
                     };
-                    push_field(child, &child_path, child_name, depth + 1, out);
+                    push_field(registry, child, &child_path, child_name, depth + 1, out);
                 }
             }
             return;
@@ -942,13 +1096,26 @@ fn vec_field(
     }
 }
 
-/// A non-editable color preview swatch row (the R/G/B/A channel inputs follow it).
-fn color_swatch_field(field_label: String, rgba: [f32; 4]) -> impl Scene {
+/// A clickable color preview swatch row: clicking opens the interactive picker popup; the
+/// R/G/B/A channel inputs follow it for direct numeric editing.
+fn color_swatch_field(
+    field_label: String,
+    target: Entity,
+    component: TypeId,
+    path: String,
+    rgba: [f32; 4],
+) -> impl Scene {
     let color = Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]);
+    let swatch_value = ColorSwatchValue(color);
     field_row(
         field_label,
         bsn! {
-            (Node { width: px(48), height: px(16) } template_value(bevy_ui::BackgroundColor(color)))
+            (@FeathersButton { @variant: ButtonVariant::Plain, @caption: bsn! {
+                (@FeathersColorSwatch
+                    template_value(swatch_value)
+                    Node { width: px(48), height: px(16) })
+            } }
+                ColorSwatchTarget { target: target, component: component, path: path })
         },
     )
 }
@@ -1198,42 +1365,63 @@ fn write_numeric(
     value: f64,
 ) {
     let Some(rc) = reflect_component_for(world, component) else {
+        warn_set(world, path);
         return;
     };
     if world.get_entity(target).is_err() {
+        warn_set(world, path);
         return;
     }
-    let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target)) else {
-        return;
-    };
-    match ty {
-        NumTy::F32 => set_path(&mut *reflected, path, value as f32),
-        NumTy::F64 => set_path(&mut *reflected, path, value),
-        NumTy::I32 => set_path(&mut *reflected, path, value as i32),
-        NumTy::I64 => set_path(&mut *reflected, path, value as i64),
-        NumTy::U32 => set_path(&mut *reflected, path, value as u32),
-        NumTy::U64 => set_path(&mut *reflected, path, value as u64),
-        NumTy::Usize => set_path(&mut *reflected, path, value as usize),
-        NumTy::ColorR | NumTy::ColorG | NumTy::ColorB | NumTy::ColorA => {
-            if let Ok(color) = reflected.path_mut::<Color>(path) {
-                let mut s = color.to_srgba();
-                let v = value as f32;
-                match ty {
-                    NumTy::ColorR => s.red = v,
-                    NumTy::ColorG => s.green = v,
-                    NumTy::ColorB => s.blue = v,
-                    _ => s.alpha = v,
+    let ok = {
+        let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target)) else {
+            warn_set(world, path);
+            return;
+        };
+        match ty {
+            NumTy::F32 => set_path(&mut *reflected, path, value as f32),
+            NumTy::F64 => set_path(&mut *reflected, path, value),
+            NumTy::I32 => set_path(&mut *reflected, path, value as i32),
+            NumTy::I64 => set_path(&mut *reflected, path, value as i64),
+            NumTy::U32 => set_path(&mut *reflected, path, value as u32),
+            NumTy::U64 => set_path(&mut *reflected, path, value as u64),
+            NumTy::Usize => set_path(&mut *reflected, path, value as usize),
+            NumTy::ColorR | NumTy::ColorG | NumTy::ColorB | NumTy::ColorA => {
+                if let Ok(color) = reflected.path_mut::<Color>(path) {
+                    let mut s = color.to_srgba();
+                    let v = value as f32;
+                    match ty {
+                        NumTy::ColorR => s.red = v,
+                        NumTy::ColorG => s.green = v,
+                        NumTy::ColorB => s.blue = v,
+                        _ => s.alpha = v,
+                    }
+                    *color = Color::srgba(s.red, s.green, s.blue, s.alpha);
+                    true
+                } else {
+                    false
                 }
-                *color = Color::srgba(s.red, s.green, s.blue, s.alpha);
             }
         }
+    };
+    if !ok {
+        warn_set(world, path);
     }
 }
 
-fn set_path<T: Reflect>(reflected: &mut dyn Reflect, path: &str, value: T) {
+/// Write `value` at `path` within `reflected`; returns whether the write succeeded.
+fn set_path<T: Reflect>(reflected: &mut dyn Reflect, path: &str, value: T) -> bool {
     if let Ok(field) = reflected.path_mut::<T>(path) {
         *field = value;
+        true
+    } else {
+        false
     }
+}
+
+/// Surface a failed inspector write-back as a warning toast naming the field.
+fn warn_set(world: &mut World, path: &str) {
+    let field = if path.is_empty() { "field" } else { path };
+    world.trigger(ShowToast::warning(format!("Couldn't set {field}")));
 }
 
 /// Default value for a registered type, if it has [`ReflectDefault`].
@@ -1253,18 +1441,24 @@ fn apply_patch(
     patch: Box<dyn PartialReflect>,
 ) {
     let Some(rc) = reflect_component_for(world, component) else {
+        warn_set(world, path);
         return;
     };
     if world.get_entity(target).is_err() {
+        warn_set(world, path);
         return;
     }
-    let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target)) else {
-        return;
-    };
-    let Ok(container) = reflected.reflect_path_mut(path) else {
-        return;
-    };
-    apply_element_patch(container, op, &*patch);
+    {
+        let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target)) else {
+            warn_set(world, path);
+            return;
+        };
+        let Ok(container) = reflected.reflect_path_mut(path) else {
+            warn_set(world, path);
+            return;
+        };
+        apply_element_patch(container, op, &*patch);
+    }
 }
 
 /// Patch a scalar into an `Option` payload or a `Map` value held by `container`.
@@ -1447,13 +1641,22 @@ fn on_bool_changed(
             return;
         }
         let Some(rc) = reflect_component_for(world, component) else {
+            warn_set(world, &path);
             return;
         };
         if world.get_entity(target).is_err() {
+            warn_set(world, &path);
             return;
         }
-        if let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target)) {
-            set_path(&mut *reflected, &path, value);
+        let ok = {
+            let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target)) else {
+                warn_set(world, &path);
+                return;
+            };
+            set_path(&mut *reflected, &path, value)
+        };
+        if !ok {
+            warn_set(world, &path);
         }
     });
 }
@@ -1484,6 +1687,7 @@ fn cycle_enum(
         return;
     }
     let Some(rc) = reflect_component_for(world, component) else {
+        warn_set(world, path);
         return;
     };
     let current = world.get_entity(target).ok().and_then(|entity_ref| {
@@ -1502,10 +1706,18 @@ fn cycle_enum(
         return;
     };
 
-    if let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target))
-        && let Ok(field) = reflected.reflect_path_mut(path)
-    {
-        field.apply(&DynamicEnum::new(next_name, DynamicVariant::Unit));
+    let ok = {
+        if let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target))
+            && let Ok(field) = reflected.reflect_path_mut(path)
+        {
+            field.apply(&DynamicEnum::new(next_name, DynamicVariant::Unit));
+            true
+        } else {
+            false
+        }
+    };
+    if !ok {
+        warn_set(world, path);
     }
 }
 
@@ -1531,15 +1743,25 @@ fn commit_string_fields(
                 return;
             }
             let Some(rc) = reflect_component_for(world, component) else {
+                warn_set(world, &path);
                 return;
             };
             if world.get_entity(target).is_err() {
+                warn_set(world, &path);
                 return;
             }
-            if let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target))
-                && let Ok(field) = reflected.path_mut::<String>(path.as_str())
-            {
-                *field = value;
+            let ok = {
+                if let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target))
+                    && let Ok(field) = reflected.path_mut::<String>(path.as_str())
+                {
+                    *field = value;
+                    true
+                } else {
+                    false
+                }
+            };
+            if !ok {
+                warn_set(world, &path);
             }
         });
     }
@@ -1775,11 +1997,233 @@ fn on_remove_component_button(
     });
 }
 
+// ---------------------------------------------------------------------------
+// Color picker popup
+// ---------------------------------------------------------------------------
+
+/// Open the picker when the inspector's color swatch is clicked.
+fn on_color_swatch_button(
+    act: On<Activate>,
+    swatches: Query<&ColorSwatchTarget>,
+    mut commands: Commands,
+) {
+    let Ok(swatch) = swatches.get(act.entity) else {
+        return;
+    };
+    commands.trigger(OpenColorPicker {
+        target: swatch.target,
+        component: swatch.component,
+        path: swatch.path.clone(),
+    });
+}
+
+/// Read the field's current color, seed [`ActiveColorEdit`], and spawn the picker dialog.
+fn on_open_color_picker(ev: On<OpenColorPicker>, mut commands: Commands) {
+    let (target, component, path) = (ev.target, ev.component, ev.path.clone());
+    commands.queue(move |world: &mut World| {
+        let color = read_color(world, target, component, &path).unwrap_or(Color::WHITE);
+        let hsla: Hsla = color.into();
+        world.insert_resource(ActiveColorEdit {
+            target,
+            component,
+            path,
+            color: hsla,
+        });
+        let _ = world.spawn_scene(color_picker_overlay(hsla));
+    });
+}
+
+/// Read a reflected `Color` at `path`, if present.
+fn read_color(world: &World, target: Entity, component: TypeId, path: &str) -> Option<Color> {
+    let rc = reflect_component_for(world, component)?;
+    let entity_ref = world.get_entity(target).ok()?;
+    let reflected = rc.reflect(entity_ref)?;
+    reflected.path::<Color>(path).ok().copied()
+}
+
+/// Write a `Color` back through the reflect path, toasting on failure.
+fn write_color(world: &mut World, target: Entity, component: TypeId, path: &str, color: Color) {
+    let Some(rc) = reflect_component_for(world, component) else {
+        warn_set(world, path);
+        return;
+    };
+    if world.get_entity(target).is_err() {
+        warn_set(world, path);
+        return;
+    }
+    let ok = {
+        let Some(mut reflected) = rc.reflect_mut(world.entity_mut(target)) else {
+            warn_set(world, path);
+            return;
+        };
+        if let Ok(c) = reflected.path_mut::<Color>(path) {
+            *c = color;
+            true
+        } else {
+            false
+        }
+    };
+    if !ok {
+        warn_set(world, path);
+    }
+}
+
+/// Queue a write of the picker's current color to the world; on `refresh` also rebuild the
+/// inspector so its swatch + channels catch up (done only on interaction end to avoid thrash).
+fn commit_active_color(commands: &mut Commands, edit: &ActiveColorEdit, refresh: bool) {
+    let (target, component, path, color) = (
+        edit.target,
+        edit.component,
+        edit.path.clone(),
+        Color::from(edit.color),
+    );
+    commands.queue(move |world: &mut World| {
+        write_color(world, target, component, &path, color);
+        if refresh {
+            world.resource_mut::<InspectorDirty>().0 = true;
+        }
+    });
+}
+
+/// Hue/saturation from the 2D plane (x = hue, y = 1 − saturation, matching the HS shader).
+fn on_picker_plane(
+    change: On<ValueChange<Vec2>>,
+    planes: Query<(), With<PickerPlane>>,
+    edit: Option<ResMut<ActiveColorEdit>>,
+    mut commands: Commands,
+) {
+    if !planes.contains(change.source) {
+        return;
+    }
+    let Some(mut edit) = edit else {
+        return;
+    };
+    edit.color.hue = (change.value.x * 360.0).clamp(0.0, 360.0);
+    edit.color.saturation = (1.0 - change.value.y).clamp(0.0, 1.0);
+    commit_active_color(&mut commands, &edit, change.is_final);
+}
+
+fn on_picker_lightness(
+    change: On<ValueChange<f32>>,
+    sliders: Query<(), With<PickerLightness>>,
+    edit: Option<ResMut<ActiveColorEdit>>,
+    mut commands: Commands,
+) {
+    if !sliders.contains(change.source) {
+        return;
+    }
+    let Some(mut edit) = edit else {
+        return;
+    };
+    edit.color.lightness = change.value.clamp(0.0, 1.0);
+    commit_active_color(&mut commands, &edit, change.is_final);
+}
+
+fn on_picker_alpha(
+    change: On<ValueChange<f32>>,
+    sliders: Query<(), With<PickerAlpha>>,
+    edit: Option<ResMut<ActiveColorEdit>>,
+    mut commands: Commands,
+) {
+    if !sliders.contains(change.source) {
+        return;
+    }
+    let Some(mut edit) = edit else {
+        return;
+    };
+    edit.color.alpha = change.value.clamp(0.0, 1.0);
+    commit_active_color(&mut commands, &edit, change.is_final);
+}
+
+/// Keep the picker's widgets in sync with [`ActiveColorEdit`] (thumb positions, gradients,
+/// preview). Setting these components doesn't re-emit `ValueChange`, so there's no feedback loop.
+fn sync_picker_widgets(
+    edit: Option<Res<ActiveColorEdit>>,
+    mut planes: Query<&mut ColorPlaneValue, With<PickerPlane>>,
+    mut previews: Query<&mut ColorSwatchValue, With<PickerPreview>>,
+    lightness: Query<Entity, (With<PickerLightness>, Without<PickerAlpha>)>,
+    alpha: Query<Entity, (With<PickerAlpha>, Without<PickerLightness>)>,
+    mut commands: Commands,
+) {
+    let Some(edit) = edit else {
+        return;
+    };
+    if !edit.is_changed() {
+        return;
+    }
+    let hsla = edit.color;
+    let color = Color::from(hsla);
+    let plane_v = Vec3::new(
+        (hsla.hue / 360.0).clamp(0.0, 1.0),
+        (1.0 - hsla.saturation).clamp(0.0, 1.0),
+        hsla.lightness,
+    );
+    for mut v in planes.iter_mut() {
+        v.0 = plane_v;
+    }
+    for mut s in previews.iter_mut() {
+        s.0 = color;
+    }
+    // `SliderValue` is an immutable component, so update sliders by re-inserting.
+    for e in lightness.iter() {
+        commands
+            .entity(e)
+            .insert((SliderValue(hsla.lightness), SliderBaseColor(color)));
+    }
+    for e in alpha.iter() {
+        commands
+            .entity(e)
+            .insert((SliderValue(hsla.alpha), SliderBaseColor(color)));
+    }
+}
+
+/// The picker popup: a hue/saturation plane, lightness + alpha sliders, and a live preview.
+fn color_picker_overlay(color: Hsla) -> impl Scene {
+    let plane_v = Vec3::new(
+        (color.hue / 360.0).clamp(0.0, 1.0),
+        (1.0 - color.saturation).clamp(0.0, 1.0),
+        color.lightness,
+    );
+    let col = Color::from(color);
+    let plane_value = ColorPlaneValue(plane_v);
+    let light_base = SliderBaseColor(col);
+    let alpha_base = SliderBaseColor(col);
+    let preview = ColorSwatchValue(col);
+    let lightness = color.lightness;
+    let alpha = color.alpha;
+    dialog_frame(
+        "Color",
+        px(280),
+        bsn! {
+            (Node { display: Display::Flex, flex_direction: FlexDirection::Column, row_gap: px(10) }
+                Children [
+                    (@FeathersColorPlane::HueSaturation
+                        template_value(plane_value)
+                        PickerPlane
+                        Node { min_height: px(150) }),
+                    (@FeathersColorSlider { @value: lightness, @channel: ColorChannel::HslLightness }
+                        template_value(light_base)
+                        PickerLightness),
+                    (@FeathersColorSlider { @value: alpha, @channel: ColorChannel::Alpha }
+                        template_value(alpha_base)
+                        PickerAlpha),
+                    (@FeathersColorSwatch { @opaque_color_percentage: 40.0 }
+                        template_value(preview)
+                        PickerPreview
+                        Node { min_height: px(24) }),
+                    (@FeathersButton { @variant: ButtonVariant::Normal, @caption: bsn! { Text("Done") ThemedText } }
+                        on(|_: On<Activate>, mut c: Commands| { c.trigger(crate::ui::CloseOverlay); })),
+                ])
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        add_component_rows, apply_element_patch, apply_structural, axis_sigil, vector_axes,
-        FieldOp, NumTy,
+        add_component_rows, apply_element_patch, apply_structural, axis_sigil, color_editor,
+        push_field, vector_axes, vector_editor, FieldEditorCtx, FieldModel, FieldOp, FieldValue,
+        NumTy, PropertyEditorRegistry,
     };
     use alloc::collections::BTreeMap;
     use bevy_feathers::tokens;
@@ -1928,5 +2372,84 @@ mod tests {
         assert_eq!(m.get(""), Some(&7.0), "the 0th entry's value was patched");
         apply_structural(&mut m, &FieldOp::MapRemove(0), &reg);
         assert!(m.is_empty(), "remove drops the 0th entry");
+    }
+
+    #[test]
+    fn registry_custom_editor_overrides_builtin() {
+        fn dummy(ctx: &FieldEditorCtx, out: &mut Vec<FieldModel>) -> bool {
+            out.push(FieldModel::leaf(
+                "custom",
+                ctx.path,
+                FieldValue::ReadOnly("CUSTOM".into()),
+            ));
+            true
+        }
+        let mut reg = PropertyEditorRegistry::default();
+        reg.register::<f32>(dummy);
+        let mut out = Vec::new();
+        let v = 1.5_f32;
+        push_field(&reg, &v, "x", "x", 0, &mut out);
+        assert_eq!(out.len(), 1, "custom editor handled the field");
+        assert!(matches!(out[0].value, FieldValue::ReadOnly(ref s) if s == "CUSTOM"));
+    }
+
+    #[test]
+    fn registry_falls_back_to_builtin_when_unregistered() {
+        let reg = PropertyEditorRegistry::default();
+        let mut out = Vec::new();
+        let v = 2.0_f32;
+        push_field(&reg, &v, "x", "x", 0, &mut out);
+        assert!(
+            matches!(out[0].value, FieldValue::Num { .. }),
+            "unregistered f32 uses the built-in scalar editor"
+        );
+    }
+
+    #[test]
+    fn builtin_color_editor_emits_swatch_and_channels() {
+        use bevy_color::Color;
+        let c = Color::srgba(0.1, 0.2, 0.3, 0.4);
+        let ctx = FieldEditorCtx {
+            value: &c,
+            path: "color",
+            label: "color",
+        };
+        let mut out = Vec::new();
+        assert!(color_editor(&ctx, &mut out));
+        assert_eq!(out.len(), 5, "swatch + R/G/B/A channels");
+        assert!(matches!(out[0].value, FieldValue::ColorSwatch { .. }));
+        assert!(matches!(
+            out[1].value,
+            FieldValue::Num {
+                ty: NumTy::ColorR,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn builtin_vector_editor_groups_axes_and_declines_non_vectors() {
+        use bevy_math::Vec3;
+        let v = Vec3::new(1.0, 2.0, 3.0);
+        let ctx = FieldEditorCtx {
+            value: &v,
+            path: "translation",
+            label: "translation",
+        };
+        let mut out = Vec::new();
+        assert!(vector_editor(&ctx, &mut out));
+        match &out[0].value {
+            FieldValue::Vec { axes } => assert_eq!(axes.len(), 3),
+            _ => panic!("expected one grouped vector row"),
+        }
+
+        let s = String::from("hi");
+        let ctx2 = FieldEditorCtx {
+            value: &s,
+            path: "n",
+            label: "n",
+        };
+        let mut out2 = Vec::new();
+        assert!(!vector_editor(&ctx2, &mut out2), "non-vector declined");
     }
 }

@@ -18,6 +18,7 @@ extern crate alloc;
 
 mod actions;
 mod build_export;
+mod code_highlight;
 mod markers;
 mod play;
 mod remote;
@@ -35,9 +36,11 @@ pub mod diagnostics;
 pub mod gameplay;
 pub mod hierarchy;
 pub mod inspector;
+pub mod localization;
 pub mod material;
 pub mod project;
 pub mod scene_io;
+pub mod theme_editor;
 pub mod ui;
 pub mod ui_edit;
 pub mod viewport;
@@ -121,6 +124,10 @@ impl PluginGroup for EditorPlugins {
             .add(gameplay::GameplayPlugin)
             // Audio master-volume mixer.
             .add(audio::AudioEditorPlugin)
+            // Game-UI theme-token editor.
+            .add(theme_editor::ThemeEditorPlugin)
+            // Localization string-table editor.
+            .add(localization::LocalizationEditorPlugin)
             // Multi-scene tabs.
             .add(tabs::TabsPlugin)
             // Remote (BRP) inspection + editing over the Bevy Remote Protocol.

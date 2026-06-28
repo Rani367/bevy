@@ -87,8 +87,30 @@ pub(crate) struct ContextMenuBackdrop;
 struct CloseContextMenu;
 
 /// Set when the hierarchy needs to be rebuilt (entity added/removed/renamed/reparented).
+/// `cooldown` debounces bursts: a multi-entity reparent/undo spread across consecutive frames
+/// collapses into a single rebuild instead of one per frame.
 #[derive(Resource, Default)]
-struct HierarchyDirty(bool);
+struct HierarchyDirty {
+    dirty: bool,
+    cooldown: u8,
+}
+
+impl HierarchyDirty {
+    /// Flag a rebuild and (re)arm the debounce window.
+    fn mark(&mut self) {
+        self.dirty = true;
+        self.cooldown = 1;
+    }
+}
+
+/// The hierarchy search box's live filter text. Rows whose name (or a descendant's name)
+/// don't contain it are hidden; ancestors of matches are kept for tree context.
+#[derive(Resource, Default)]
+pub(crate) struct HierarchyFilter(pub(crate) String);
+
+/// Marks the hierarchy panel's search input.
+#[derive(Component, Default, Clone, Copy)]
+pub struct HierarchySearch;
 
 /// Scene entities whose children are currently collapsed in the tree.
 #[derive(Resource, Default)]
@@ -106,15 +128,18 @@ impl Plugin for HierarchyPlugin {
         app.init_resource::<HierarchyDirty>()
             .init_resource::<CollapsedNodes>()
             .init_resource::<Renaming>()
+            .init_resource::<HierarchyFilter>()
             .add_systems(
                 Update,
                 (
                     mark_hierarchy_dirty,
+                    update_hierarchy_filter,
                     rebuild_hierarchy,
                     highlight_rows,
                     commit_rename,
                     close_menu_on_escape,
-                ),
+                )
+                    .chain(),
             )
             .add_observer(on_spawn_request)
             .add_observer(on_delete_selected)
@@ -144,7 +169,23 @@ fn mark_hierarchy_dirty(
     mut dirty: ResMut<HierarchyDirty>,
 ) {
     if !changed.is_empty() || removed.read().next().is_some() {
-        dirty.0 = true;
+        dirty.mark();
+    }
+}
+
+/// Push the search box's text into [`HierarchyFilter`] and request a rebuild when it changes.
+fn update_hierarchy_filter(
+    search: Query<&EditableText, (With<HierarchySearch>, Changed<EditableText>)>,
+    mut filter: ResMut<HierarchyFilter>,
+    mut dirty: ResMut<HierarchyDirty>,
+) {
+    let Ok(text) = search.single() else {
+        return;
+    };
+    let new = text.value().to_string();
+    if new != filter.0 {
+        filter.0 = new;
+        dirty.mark();
     }
 }
 
@@ -161,19 +202,31 @@ fn rebuild_hierarchy(
     selection: Res<EditorSelection>,
     collapsed: Res<CollapsedNodes>,
     renaming: Res<Renaming>,
+    filter: Res<HierarchyFilter>,
 ) {
-    if !dirty.0 {
+    if !dirty.dirty {
         return;
     }
-    dirty.0 = false;
+    // Debounce: wait out the cooldown so a burst of changes collapses into one rebuild.
+    if dirty.cooldown > 0 {
+        dirty.cooldown -= 1;
+        return;
+    }
+    dirty.dirty = false;
 
     let Ok(content) = content_q.single() else {
         return;
     };
 
+    let needle = filter.0.trim().to_lowercase();
     let mut flat: Vec<(Entity, usize)> = Vec::new();
     for root in roots_q.iter() {
-        push_subtree(root, 0, &children_q, &scene_q, &collapsed, &mut flat);
+        if needle.is_empty() {
+            push_subtree(root, 0, &children_q, &scene_q, &collapsed, &mut flat);
+        } else {
+            // While filtering, expand through collapsed nodes so matches are always revealed.
+            push_filtered(root, 0, &needle, &children_q, &scene_q, &name_q, &mut flat);
+        }
     }
 
     let rows: Vec<Box<dyn SceneList>> = flat
@@ -228,6 +281,58 @@ fn push_subtree(
         for child in children.iter() {
             if scene_q.contains(child) {
                 push_subtree(child, depth + 1, children_q, scene_q, collapsed, out);
+            }
+        }
+    }
+}
+
+/// Whether `entity`'s name, or any scene-entity descendant's name, contains `needle`
+/// (lowercased). Drives the filtered tree so matches and their ancestors stay visible.
+fn subtree_matches(
+    entity: Entity,
+    needle: &str,
+    children_q: &Query<&Children>,
+    scene_q: &Query<(), With<SceneEntity>>,
+    name_q: &Query<&Name>,
+) -> bool {
+    if name_q
+        .get(entity)
+        .map(|n| n.as_str().to_lowercase().contains(needle))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if let Ok(children) = children_q.get(entity) {
+        for child in children.iter() {
+            if scene_q.contains(child)
+                && subtree_matches(child, needle, children_q, scene_q, name_q)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Depth-first push of the filtered tree: include an entity iff its subtree contains a match,
+/// keeping matches plus their ancestors. Ignores the collapsed set so matches are revealed.
+fn push_filtered(
+    entity: Entity,
+    depth: usize,
+    needle: &str,
+    children_q: &Query<&Children>,
+    scene_q: &Query<(), With<SceneEntity>>,
+    name_q: &Query<&Name>,
+    out: &mut Vec<(Entity, usize)>,
+) {
+    if !subtree_matches(entity, needle, children_q, scene_q, name_q) {
+        return;
+    }
+    out.push((entity, depth));
+    if let Ok(children) = children_q.get(entity) {
+        for child in children.iter() {
+            if scene_q.contains(child) {
+                push_filtered(child, depth + 1, needle, children_q, scene_q, name_q, out);
             }
         }
     }
@@ -402,7 +507,7 @@ fn on_disclosure_click(
     } else {
         collapsed.0.insert(disclosure.0);
     }
-    dirty.0 = true;
+    dirty.mark();
 }
 
 /// Recolor rows to reflect the current selection without a full rebuild.
@@ -519,7 +624,7 @@ fn on_rename_request(
     mut dirty: ResMut<HierarchyDirty>,
 ) {
     renaming.0 = Some(req.0);
-    dirty.0 = true;
+    dirty.mark();
 }
 
 /// Commit the inline rename on Enter (writing the new `Name`), or cancel on Escape.
@@ -536,7 +641,7 @@ fn commit_rename(
     };
     if keys.just_pressed(KeyCode::Escape) {
         renaming.0 = None;
-        dirty.0 = true;
+        dirty.mark();
         return;
     }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
@@ -550,7 +655,7 @@ fn commit_rename(
             }
         }
         renaming.0 = None;
-        dirty.0 = true;
+        dirty.mark();
     }
 }
 
@@ -578,7 +683,7 @@ fn on_spawn_request(
         default_name(kind),
     );
     selection.set_single(entity);
-    dirty.0 = true;
+    dirty.mark();
 }
 
 /// Despawn the selected entities and clear the selection.
@@ -593,7 +698,7 @@ fn on_delete_selected(
         commands.entity(entity).despawn();
     }
     selection.clear();
-    dirty.0 = true;
+    dirty.mark();
 }
 
 /// Duplicate every selected entity (shallow: components only, not descendants) and select
@@ -691,7 +796,7 @@ fn on_reparent_request(
             commands.entity(child).remove::<ChildOf>();
         }
     }
-    dirty.0 = true;
+    dirty.mark();
 }
 
 /// Whether `candidate` is `root` itself or one of its descendants. The `depth` cap guards

@@ -40,17 +40,23 @@ pub enum BottomTab {
     Material,
     /// Audio master-volume mixer.
     Audio,
+    /// Game-UI theme/design-token editor.
+    Theme,
+    /// Localization string-table editor.
+    Localization,
 }
 
 impl BottomTab {
     /// All tabs, in display order.
-    pub const ALL: [BottomTab; 6] = [
+    pub const ALL: [BottomTab; 8] = [
         BottomTab::Console,
         BottomTab::Output,
         BottomTab::Stats,
         BottomTab::Animation,
         BottomTab::Material,
         BottomTab::Audio,
+        BottomTab::Theme,
+        BottomTab::Localization,
     ];
 
     /// Human-readable tab title.
@@ -62,6 +68,8 @@ impl BottomTab {
             BottomTab::Animation => "Animation",
             BottomTab::Material => "Material",
             BottomTab::Audio => "Audio",
+            BottomTab::Theme => "Theme",
+            BottomTab::Localization => "Localization",
         }
     }
 
@@ -74,6 +82,8 @@ impl BottomTab {
             BottomTab::Animation => icons::PLAY_MODE,
             BottomTab::Material => icons::SPHERE,
             BottomTab::Audio => icons::PLAY,
+            BottomTab::Theme => icons::SUN,
+            BottomTab::Localization => icons::LIST,
         }
     }
 
@@ -86,6 +96,8 @@ impl BottomTab {
             BottomTab::Animation => "animation",
             BottomTab::Material => "material",
             BottomTab::Audio => "audio",
+            BottomTab::Theme => "theme",
+            BottomTab::Localization => "localization",
         }
     }
 
@@ -236,6 +248,8 @@ pub fn bottom_dock_panel() -> impl Scene {
                     (crate::animation::animation_body() BottomTabContent(BottomTab::Animation)),
                     (crate::material::material_body() BottomTabContent(BottomTab::Material)),
                     (crate::audio::audio_body() BottomTabContent(BottomTab::Audio)),
+                    (crate::theme_editor::theme_editor_body() BottomTabContent(BottomTab::Theme)),
+                    (crate::localization::localization_body() BottomTabContent(BottomTab::Localization)),
                 ]
             ),
         ]

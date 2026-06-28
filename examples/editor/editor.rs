@@ -105,56 +105,68 @@ fn take_screenshot(
         return;
     }
     // Optionally open a dialog/overlay before capturing, to screenshot it.
-    if req.frame == 60 {
-        if let Ok(open) = std::env::var("EDITOR_SHOT_OPEN") {
-            match open.as_str() {
-                "save" => commands.trigger(bevy::editor::OpenSaveDialog),
-                "import" => commands.trigger(bevy::editor::OpenImportDialog),
-                "newproject" => commands.trigger(bevy::editor::project::OpenNewProjectDialog),
-                "openproject" => commands.trigger(bevy::editor::project::OpenOpenProjectDialog),
-                "code" => {
-                    commands.queue(|world: &mut World| {
-                        if let Some(mut view) = world.get_resource_mut::<bevy::editor::MainView>() {
-                            *view = bevy::editor::MainView::Code;
-                        }
-                    });
-                }
-                "stats" => commands.trigger(bevy::editor::ui::ShowBottomTab(
-                    bevy::editor::ui::BottomTab::Stats,
-                )),
-                "material" => commands.trigger(bevy::editor::ui::ShowBottomTab(
-                    bevy::editor::ui::BottomTab::Material,
-                )),
-                "animation" => commands.trigger(bevy::editor::ui::ShowBottomTab(
-                    bevy::editor::ui::BottomTab::Animation,
-                )),
-                "settings" => commands.trigger(bevy::editor::project::OpenProjectSettings),
-                "uinode" => commands.trigger(bevy::editor::SpawnRequest(SpawnKind::UiNode)),
-                "audio" => commands.trigger(bevy::editor::ui::ShowBottomTab(
-                    bevy::editor::ui::BottomTab::Audio,
-                )),
-                "physics" => commands.trigger(bevy::editor::gameplay::SpawnPhysicsCube),
-                "palette" => commands.trigger(bevy::editor::ui::OpenCommandPalette),
-                "console" => commands.trigger(bevy::editor::ui::ToggleConsole),
-                "theme" => commands.trigger(bevy::editor::ui::ToggleTheme),
-                "toast" => {
-                    commands.trigger(bevy::editor::ui::ShowToast::success("Scene saved"));
-                    commands.trigger(bevy::editor::ui::ShowToast::error(
-                        "Build failed — see console",
-                    ));
-                }
-                _ => {}
+    if req.frame == 60 && let Ok(open) = std::env::var("EDITOR_SHOT_OPEN") {
+        match open.as_str() {
+            "save" => commands.trigger(bevy::editor::OpenSaveDialog),
+            "import" => commands.trigger(bevy::editor::OpenImportDialog),
+            "newproject" => commands.trigger(bevy::editor::project::OpenNewProjectDialog),
+            "openproject" => commands.trigger(bevy::editor::project::OpenOpenProjectDialog),
+            "code" => {
+                commands.queue(|world: &mut World| {
+                    if let Some(mut view) = world.get_resource_mut::<bevy::editor::MainView>() {
+                        *view = bevy::editor::MainView::Code;
+                    }
+                });
             }
+            // Open a real source file to show syntax highlighting (cwd = workspace root).
+            // `EDITOR_SHOT_FILE` overrides the path for a custom capture.
+            "codehl" => {
+                let path = std::env::var("EDITOR_SHOT_FILE")
+                    .unwrap_or_else(|_| "crates/bevy_editor/src/code_highlight.rs".to_string());
+                commands.trigger(bevy::editor::code::OpenCodeFileRequest {
+                    path: std::path::PathBuf::from(path),
+                    line: None,
+                });
+            }
+            "stats" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                bevy::editor::ui::BottomTab::Stats,
+            )),
+            "material" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                bevy::editor::ui::BottomTab::Material,
+            )),
+            "animation" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                bevy::editor::ui::BottomTab::Animation,
+            )),
+            "settings" => commands.trigger(bevy::editor::project::OpenProjectSettings),
+            "uinode" => commands.trigger(bevy::editor::SpawnRequest(SpawnKind::UiNode)),
+            "audio" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                bevy::editor::ui::BottomTab::Audio,
+            )),
+            "themeeditor" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                bevy::editor::ui::BottomTab::Theme,
+            )),
+            "localization" => commands.trigger(bevy::editor::ui::ShowBottomTab(
+                bevy::editor::ui::BottomTab::Localization,
+            )),
+            "physics" => commands.trigger(bevy::editor::gameplay::SpawnPhysicsCube),
+            "palette" => commands.trigger(bevy::editor::ui::OpenCommandPalette),
+            "console" => commands.trigger(bevy::editor::ui::ToggleConsole),
+            "theme" => commands.trigger(bevy::editor::ui::ToggleTheme),
+            "toast" => {
+                commands.trigger(bevy::editor::ui::ShowToast::success("Scene saved"));
+                commands.trigger(bevy::editor::ui::ShowToast::error(
+                    "Build failed — see console",
+                ));
+            }
+            _ => {}
         }
     }
     // Let icons (embedded assets) and the viewport settle before capturing.
-    if req.frame == 90 {
-        if let Some(handle) = req.target.clone() {
-            let path = req.path.clone();
-            commands
-                .spawn(Screenshot(RenderTarget::Image(handle.into())))
-                .observe(save_to_disk(path));
-        }
+    if req.frame == 90 && let Some(handle) = req.target.clone() {
+        let path = req.path.clone();
+        commands
+            .spawn(Screenshot(RenderTarget::Image(handle.into())))
+            .observe(save_to_disk(path));
     }
     // Give the async save a few frames to flush, then quit.
     if req.frame >= 110 {

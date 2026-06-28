@@ -16,30 +16,30 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
 use bevy_app::{App, Plugin, Update};
+use bevy_color::Color;
 use bevy_ecs::prelude::*;
 use bevy_feathers::constants::{fonts, size};
-use bevy_feathers::controls::{
-    ButtonVariant, FeathersButton, FeathersTextInput, FeathersTextInputContainer,
-    FeathersToolButton,
-};
+use bevy_feathers::controls::{ButtonVariant, FeathersButton, FeathersToolButton};
 use bevy_feathers::display::{icon, label_dim};
 use bevy_feathers::theme::{
-    ThemeBackgroundColor, ThemeBorderColor, ThemeTextColor, ThemeToken, ThemedText,
+    ThemeBackgroundColor, ThemeBorderColor, ThemeTextColor, ThemeToken, ThemedText, UiTheme,
 };
 use bevy_feathers::tokens;
 use bevy_picking::Pickable;
 use bevy_scene::prelude::*;
 use bevy_scene::EntityScene;
-use bevy_text::{EditableText, FontSourceTemplate, FontWeight, TextFont};
-use bevy_ui::widget::Text;
-use bevy_ui::{px, AlignItems, Display, FlexDirection, Node, Overflow, UiRect};
+use bevy_text::{
+    EditableText, FontSourceTemplate, FontWeight, LineBreak, TextColor, TextCursorStyle, TextFont,
+    TextLayout, TextSpan,
+};
+use bevy_ui::widget::{Text, TextScroll};
+use bevy_ui::{px, AlignItems, Display, FlexDirection, Node, Overflow, PositionType, UiRect};
 use bevy_ui_widgets::{Activate, ScrollArea};
 
+use crate::code_highlight::{tokenize, SyntaxKind};
 use crate::project::{ActiveProject, BuildProfile};
 use crate::ui::style::{etokens, sizes, space};
-use crate::ui::{
-    icons, BottomTab, MultilineSeed, OutputContent, SeedText, ShowBottomTab, ShowToast,
-};
+use crate::ui::{icons, BottomTab, OutputContent, ShowBottomTab, ShowToast};
 
 // ---------------------------------------------------------------------------
 // Main view (scene viewport vs code editor)
@@ -134,6 +134,9 @@ pub struct StopGameRequest;
 /// The multi-line text area holding the open file's contents.
 #[derive(Component, Default, Clone, Copy)]
 struct CodeEditorInput;
+/// The read-only colored layer behind the editor; its `TextSpan` children carry syntax colors.
+#[derive(Component, Default, Clone, Copy)]
+struct CodeHighlightView;
 /// The container the file-list buttons are spawned into.
 #[derive(Component, Default, Clone, Copy)]
 struct CodeFileList;
@@ -240,6 +243,9 @@ impl Plugin for CodePlugin {
                     render_output,
                     poll_cargo_check,
                     reap_finished_game,
+                    update_code_highlight,
+                    sync_code_highlight_scroll,
+                    sync_code_cursor_color,
                 ),
             )
             .add_observer(on_open_code_file)
@@ -294,14 +300,64 @@ pub fn code_panel() -> impl Scene {
                         ScrollArea
                         CodeFileList
                     ),
-                    (@FeathersTextInputContainer
-                        Node { flex_grow: 1.0, min_width: px(0) }
-                        Children [
-                            (@FeathersTextInput SeedText(String::new()) MultilineSeed CodeEditorInput)
-                        ]),
+                    code_editor_area(),
                 ]
             ),
         ]
+    }
+}
+
+/// The editable code surface: a colored read-only `Text` (per-token `TextSpan` children) sits
+/// behind a glyph-transparent `EditableText`, both monospace + `NoWrap` so they lay out
+/// identically. The editor owns a fixed `visible_lines` viewport (with internal scroll); the
+/// colored layer is translated by the editor's `TextScroll` each frame (`sync_code_highlight_scroll`)
+/// so the two layers stay aligned while scrolling. The cursor/selection of the (transparent)
+/// editor render on top of the colored text.
+fn code_editor_area() -> impl Scene {
+    let empty = String::new();
+    bsn! {
+        (
+            Node {
+                flex_grow: 1.0,
+                min_width: px(0),
+                min_height: px(0),
+                position_type: PositionType::Relative,
+                overflow: Overflow::clip(),
+                padding: UiRect::axes(px(10), px(8)),
+            }
+            ThemeBackgroundColor(tokens::TEXT_INPUT_BG)
+            Children [
+                (
+                    Node { position_type: PositionType::Relative }
+                    Children [
+                        (
+                            Text(empty)
+                            TextFont {
+                                font: FontSourceTemplate::Handle(fonts::MONO),
+                                font_size: size::SMALL_FONT,
+                                weight: FontWeight::NORMAL,
+                            }
+                            TextLayout { linebreak: LineBreak::NoWrap }
+                            CodeHighlightView
+                            Pickable::IGNORE
+                            Node { position_type: PositionType::Absolute, top: px(0), left: px(0) }
+                        ),
+                        (
+                            EditableText { allow_newlines: true, visible_lines: {Some(40.0)} }
+                            TextFont {
+                                font: FontSourceTemplate::Handle(fonts::MONO),
+                                font_size: size::SMALL_FONT,
+                                weight: FontWeight::NORMAL,
+                            }
+                            TextColor(Color::NONE)
+                            TextLayout { linebreak: LineBreak::NoWrap }
+                            template_value(TextCursorStyle::default())
+                            CodeEditorInput
+                        ),
+                    ]
+                ),
+            ]
+        )
     }
 }
 
@@ -443,6 +499,8 @@ fn on_open_code_file(
     if let Ok(mut editable) = inputs.single_mut() {
         let mut text = EditableText::new(&content);
         text.allow_newlines = true;
+        // A fixed viewport with internal scroll; the colored highlight layer is kept aligned
+        // by translating it with the editor's `TextScroll` (see `sync_code_highlight_scroll`).
         text.visible_lines = Some(40.0);
         *editable = text;
     }
@@ -474,6 +532,112 @@ fn on_save_code_file(
             path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
         ))),
         Err(err) => commands.trigger(ShowToast::error(format!("Save failed: {err}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Syntax highlighting (colored layer behind the editor)
+// ---------------------------------------------------------------------------
+
+/// Maximum buffer size that gets per-token highlighting; larger files render as one plain span
+/// to avoid spawning tens of thousands of `TextSpan` entities on every keystroke.
+const MAX_HIGHLIGHT_BYTES: usize = 24_000;
+
+/// Map a [`SyntaxKind`] to its theme color token.
+fn syntax_token(kind: SyntaxKind) -> ThemeToken {
+    match kind {
+        SyntaxKind::Keyword | SyntaxKind::Lifetime => etokens::SYNTAX_KEYWORD,
+        SyntaxKind::Type => etokens::SYNTAX_TYPE,
+        SyntaxKind::Function => etokens::SYNTAX_FUNCTION,
+        SyntaxKind::Macro | SyntaxKind::Attribute => etokens::SYNTAX_MACRO,
+        SyntaxKind::Str | SyntaxKind::Char => etokens::SYNTAX_STRING,
+        SyntaxKind::Number => etokens::SYNTAX_NUMBER,
+        SyntaxKind::Comment => etokens::SYNTAX_COMMENT,
+        SyntaxKind::Punct => etokens::SYNTAX_PUNCT,
+        SyntaxKind::Normal => etokens::SYNTAX_NORMAL,
+    }
+}
+
+/// One colored `TextSpan` child of the highlight layer.
+fn code_span(text: String, color: Color) -> impl Scene {
+    bsn! {
+        (
+            TextSpan(text)
+            TextFont {
+                font: FontSourceTemplate::Handle(fonts::MONO),
+                font_size: size::SMALL_FONT,
+                weight: FontWeight::NORMAL,
+            }
+            template_value(TextColor(color))
+            Pickable::IGNORE
+        )
+    }
+}
+
+/// Build the colored spans for `content`, resolving syntax tokens against the live theme.
+fn build_code_spans(content: &str, theme: &UiTheme) -> Vec<Box<dyn SceneList>> {
+    if content.len() > MAX_HIGHLIGHT_BYTES {
+        let color = theme.color(&etokens::SYNTAX_NORMAL);
+        return vec![Box::new(EntityScene(code_span(content.to_string(), color)))];
+    }
+    tokenize(content)
+        .into_iter()
+        .map(|(range, kind)| {
+            let color = theme.color(&syntax_token(kind));
+            Box::new(EntityScene(code_span(content[range].to_string(), color)))
+                as Box<dyn SceneList>
+        })
+        .collect()
+}
+
+/// Re-tokenize the editor buffer and rebuild the colored layer's spans when the text or theme
+/// changes. The editor's glyphs are transparent, so this layer is what the user actually sees.
+fn update_code_highlight(
+    editor: Query<&EditableText, With<CodeEditorInput>>,
+    changed: Query<(), (With<CodeEditorInput>, Changed<EditableText>)>,
+    theme: Res<UiTheme>,
+    view_q: Query<Entity, With<CodeHighlightView>>,
+    mut commands: Commands,
+) {
+    if changed.is_empty() && !theme.is_changed() {
+        return;
+    }
+    let (Ok(text), Ok(view)) = (editor.single(), view_q.single()) else {
+        return;
+    };
+    let spans = build_code_spans(&text.value().to_string(), &theme);
+    commands.entity(view).despawn_children();
+    commands
+        .entity(view)
+        .queue_spawn_related_scenes::<Children>(spans);
+}
+
+/// Translate the colored highlight layer by the editor's internal scroll offset so the two
+/// layers stay aligned as the caret moves through a long file.
+fn sync_code_highlight_scroll(
+    editor: Query<&TextScroll, (With<CodeEditorInput>, Changed<TextScroll>)>,
+    mut view: Query<&mut Node, With<CodeHighlightView>>,
+) {
+    let Ok(scroll) = editor.single() else {
+        return;
+    };
+    for mut node in view.iter_mut() {
+        node.left = px(-scroll.0.x);
+        node.top = px(-scroll.0.y);
+    }
+}
+
+/// Keep the (theme-less) raw editor's cursor + selection colors in sync with the theme.
+fn sync_code_cursor_color(
+    theme: Res<UiTheme>,
+    mut cursors: Query<&mut TextCursorStyle, With<CodeEditorInput>>,
+) {
+    if !theme.is_changed() {
+        return;
+    }
+    for mut style in cursors.iter_mut() {
+        style.color = theme.color(&tokens::TEXT_INPUT_CURSOR);
+        style.selection_color = theme.color(&tokens::TEXT_INPUT_SELECTION);
     }
 }
 

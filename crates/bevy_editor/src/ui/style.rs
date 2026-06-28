@@ -3,7 +3,7 @@
 //! builders. Everything visual in the editor should pull from here rather than
 //! hand-rolling magic numbers, so the look stays consistent and re-themable.
 
-use bevy_color::{Alpha, Luminance, Srgba};
+use bevy_color::{Alpha, Color, Luminance, Srgba};
 use bevy_ecs::hierarchy::Children;
 use bevy_ecs::prelude::{Commands, On};
 use bevy_feathers::{
@@ -118,6 +118,26 @@ pub mod etokens {
     pub const INFO: ThemeToken = ThemeToken::new_static("editor.status.info");
     /// Dimming scrim drawn behind modal dialogs.
     pub const SCRIM: ThemeToken = ThemeToken::new_static("editor.scrim");
+
+    // Code-editor syntax highlighting colors.
+    /// Keywords (`fn`, `let`, …).
+    pub const SYNTAX_KEYWORD: ThemeToken = ThemeToken::new_static("editor.syntax.keyword");
+    /// Type names.
+    pub const SYNTAX_TYPE: ThemeToken = ThemeToken::new_static("editor.syntax.type");
+    /// Function-call identifiers.
+    pub const SYNTAX_FUNCTION: ThemeToken = ThemeToken::new_static("editor.syntax.function");
+    /// Macro invocations.
+    pub const SYNTAX_MACRO: ThemeToken = ThemeToken::new_static("editor.syntax.macro");
+    /// String / char literals.
+    pub const SYNTAX_STRING: ThemeToken = ThemeToken::new_static("editor.syntax.string");
+    /// Numeric literals.
+    pub const SYNTAX_NUMBER: ThemeToken = ThemeToken::new_static("editor.syntax.number");
+    /// Comments.
+    pub const SYNTAX_COMMENT: ThemeToken = ThemeToken::new_static("editor.syntax.comment");
+    /// Punctuation / operators.
+    pub const SYNTAX_PUNCT: ThemeToken = ThemeToken::new_static("editor.syntax.punct");
+    /// Plain identifiers / default code text.
+    pub const SYNTAX_NORMAL: ThemeToken = ThemeToken::new_static("editor.syntax.normal");
 }
 
 /// The editor's status/level colors, independent of light/dark (tuned to read on both).
@@ -185,6 +205,16 @@ pub fn install_editor_tokens(theme: &mut ThemeProps, light: bool) {
         c.insert(etokens::HUD_BG, palette::WHITE.with_alpha(0.78));
         c.insert(etokens::HUD_TEXT, palette::GRAY_0);
         c.insert(etokens::PANEL_BORDER, palette::GRAY_3.lighter(0.2));
+        // Syntax colors tuned to read on a light background (darker, saturated).
+        c.insert(etokens::SYNTAX_KEYWORD, Color::oklch(0.45, 0.16, 310.0));
+        c.insert(etokens::SYNTAX_TYPE, Color::oklch(0.48, 0.10, 90.0));
+        c.insert(etokens::SYNTAX_FUNCTION, Color::oklch(0.45, 0.14, 250.0));
+        c.insert(etokens::SYNTAX_MACRO, Color::oklch(0.48, 0.15, 30.0));
+        c.insert(etokens::SYNTAX_STRING, Color::oklch(0.42, 0.13, 145.0));
+        c.insert(etokens::SYNTAX_NUMBER, Color::oklch(0.45, 0.12, 60.0));
+        c.insert(etokens::SYNTAX_COMMENT, Color::oklch(0.55, 0.03, 150.0));
+        c.insert(etokens::SYNTAX_PUNCT, Color::oklch(0.40, 0.02, 250.0));
+        c.insert(etokens::SYNTAX_NORMAL, Color::oklch(0.25, 0.01, 250.0));
     } else {
         c.insert(etokens::TOOLBAR_BG, palette::GRAY_1.lighter(0.02));
         c.insert(etokens::STATUS_BAR_BG, palette::ACCENT.darker(0.18));
@@ -193,6 +223,16 @@ pub fn install_editor_tokens(theme: &mut ThemeProps, light: bool) {
         c.insert(etokens::HUD_BG, palette::GRAY_0.with_alpha(0.72));
         c.insert(etokens::HUD_TEXT, palette::LIGHT_GRAY_1);
         c.insert(etokens::PANEL_BORDER, palette::WARM_GRAY_1);
+        // Syntax colors tuned to read on a dark background (brighter).
+        c.insert(etokens::SYNTAX_KEYWORD, Color::oklch(0.74, 0.13, 310.0));
+        c.insert(etokens::SYNTAX_TYPE, Color::oklch(0.82, 0.10, 90.0));
+        c.insert(etokens::SYNTAX_FUNCTION, Color::oklch(0.78, 0.11, 250.0));
+        c.insert(etokens::SYNTAX_MACRO, Color::oklch(0.78, 0.12, 30.0));
+        c.insert(etokens::SYNTAX_STRING, Color::oklch(0.80, 0.13, 145.0));
+        c.insert(etokens::SYNTAX_NUMBER, Color::oklch(0.82, 0.10, 60.0));
+        c.insert(etokens::SYNTAX_COMMENT, Color::oklch(0.62, 0.03, 150.0));
+        c.insert(etokens::SYNTAX_PUNCT, Color::oklch(0.78, 0.02, 250.0));
+        c.insert(etokens::SYNTAX_NORMAL, Color::oklch(0.90, 0.01, 250.0));
     }
 }
 

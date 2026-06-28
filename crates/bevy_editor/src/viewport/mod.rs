@@ -5,6 +5,7 @@
 mod camera;
 mod gizmos;
 mod grid;
+mod hud;
 mod outline;
 mod picking;
 
@@ -73,6 +74,7 @@ impl Plugin for ViewportPlugin {
                     picking::clear_on_escape,
                     gizmos::draw_gizmos,
                     outline::draw_selection_outline,
+                    hud::update_viewport_hud,
                 ),
             )
             .add_observer(picking::select_on_click)
@@ -194,6 +196,7 @@ fn bind_viewport_node(
         commands
             .entity(slot)
             .insert(ViewportNode::new(viewport.camera));
+        hud::spawn_viewport_hud(&mut commands, slot);
         viewport.slot = Some(slot);
     }
 }

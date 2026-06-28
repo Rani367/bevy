@@ -87,6 +87,12 @@ impl CurrentScene {
 #[derive(Resource)]
 struct AssetBrowserDirty(bool);
 
+/// Cached signature of the last-built asset tree (one entry per row: `depth:kind:rel`). When a
+/// rebuild is requested but the directory listing is unchanged, the row spawn/despawn is
+/// skipped — so a save that adds no new files doesn't churn the panel.
+#[derive(Resource, Default)]
+struct AssetBrowserCache(Option<Vec<String>>);
+
 /// Marks an asset-browser entry node; stores the scene file it opens.
 #[derive(Component, Default, Clone)]
 struct AssetEntry {
@@ -100,6 +106,7 @@ impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CurrentScene>()
             .insert_resource(AssetBrowserDirty(true))
+            .init_resource::<AssetBrowserCache>()
             .add_systems(Update, rebuild_asset_browser)
             .add_observer(on_scene_io)
             .add_observer(on_asset_click)
@@ -332,6 +339,7 @@ fn rebuild_visuals(world: &mut World, specs: &[(Entity, SpawnKind)]) {
 
 fn rebuild_asset_browser(
     mut dirty: ResMut<AssetBrowserDirty>,
+    mut cache: ResMut<AssetBrowserCache>,
     content_q: Query<Entity, With<AssetContent>>,
     asset_server: Res<AssetServer>,
     project: Res<ActiveProject>,
@@ -347,6 +355,14 @@ fn rebuild_asset_browser(
 
     let mut entries = Vec::new();
     collect_asset_tree(&project.assets_dir(), "", 0, &mut entries);
+
+    // Skip the despawn/respawn churn when the directory listing is unchanged (e.g. a save
+    // that didn't add files). The panel is already populated and correct.
+    let signature: Vec<String> = entries.iter().map(asset_entry_signature).collect();
+    if cache.0.as_ref() == Some(&signature) {
+        return;
+    }
+    cache.0 = Some(signature);
 
     commands.entity(content).despawn_children();
     let mut rows: Vec<Box<dyn SceneList>> = Vec::new();
@@ -400,6 +416,18 @@ struct AssetTreeEntry {
     /// Indent depth.
     depth: usize,
     kind: AssetKind,
+}
+
+/// A cheap, comparable signature for one asset row (depth + kind + path), used to detect
+/// whether the listing actually changed before rebuilding the panel.
+fn asset_entry_signature(e: &AssetTreeEntry) -> String {
+    let kind = match e.kind {
+        AssetKind::Dir => 'd',
+        AssetKind::Scene => 's',
+        AssetKind::Image => 'i',
+        AssetKind::Other => 'o',
+    };
+    format!("{}:{kind}:{}", e.depth, e.rel)
 }
 
 /// Recursively collect the assets directory into a flat, depth-tagged list (dirs first, sorted).
